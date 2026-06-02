@@ -1,0 +1,52 @@
+"""実行履歴ページ。自分のジョブのみ表示。admin role なら全件表示。"""
+import pandas as pd
+import streamlit as st
+
+from lib.sheets import materialize_secrets, list_jobs_for_user, list_all_jobs
+from lib.auth import require_login, logout_button
+
+st.set_page_config(page_title="実行履歴", layout="wide", page_icon="📋")
+materialize_secrets()
+
+user = require_login()
+logout_button()
+
+st.title("📋 実行履歴")
+
+is_admin = str(user.get("role", "")).strip().lower() == "admin"
+show_all = is_admin and st.toggle("全ユーザー分を表示（admin）", value=False)
+
+if st.button("🔄 更新"):
+    st.rerun()
+
+if show_all:
+    jobs = list_all_jobs(limit=200)
+else:
+    jobs = list_jobs_for_user(user["email"], limit=100)
+
+if not jobs:
+    st.info("ジョブはまだありません。")
+    st.stop()
+
+df = pd.DataFrame(jobs)
+status_color = {
+    "queued": "🟡",
+    "running": "🔵",
+    "success": "🟢",
+    "failed": "🔴",
+    "canceled": "⚪",
+}
+df["状態"] = df["status"].map(lambda s: f"{status_color.get(s, '⚪')} {s}")
+
+display_cols = [c for c in ["状態", "tool_name", "requested_at", "started_at", "finished_at", "log_url", "error", "user_email"] if c in df.columns]
+if not show_all:
+    display_cols = [c for c in display_cols if c != "user_email"]
+
+st.dataframe(
+    df[display_cols],
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "log_url": st.column_config.LinkColumn("ログ"),
+    },
+)

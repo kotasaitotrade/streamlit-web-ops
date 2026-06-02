@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+google_credentials.json
+gspread_token.json
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
