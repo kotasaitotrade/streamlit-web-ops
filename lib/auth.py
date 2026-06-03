@@ -8,16 +8,21 @@ from .sheets import get_user, user_is_active
 
 def _bypass_email() -> str | None:
     """secrets の [bypass] enable=true なら指定 email を返す。
-    テスト/E2E 用。本番では secrets から消すこと。"""
+    テスト/E2E 用。本番では secrets から消すこと。
+    bypass モード中は ?as_user=<email> で別ペルソナに切替可能。"""
     try:
-        bp = st.secrets.get("bypass") if hasattr(st.secrets, "get") else None
-        if bp is None and "bypass" in st.secrets:
-            bp = st.secrets["bypass"]
-        if not bp:
+        if "bypass" not in st.secrets:
             return None
+        bp = st.secrets["bypass"]
         enable = bp.get("enable") if hasattr(bp, "get") else None
+        if not enable:
+            return None
+        # URL クエリで上書き（bypass enable 時のみ有効）
+        as_user = st.query_params.get("as_user")
+        if as_user:
+            return str(as_user)
         email = bp.get("email") if hasattr(bp, "get") else None
-        if enable and email:
+        if email:
             return str(email)
     except Exception:
         pass
