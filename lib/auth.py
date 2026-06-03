@@ -38,15 +38,6 @@ def require_login(provider: str = "google") -> dict | None:
     """ログイン必須ガード。users シート照合まで含めて済ます。
     返り値: 認可済みユーザー行 (dict) または None（ボタンを表示して停止）。"""
 
-    # ── デバッグ: secrets 状態（E2E確認後に削除） ──
-    try:
-        secret_keys = list(st.secrets.keys())
-        bp_raw = dict(st.secrets["bypass"]) if "bypass" in st.secrets else "<no bypass section>"
-        st.caption(f"DEBUG secret keys: {secret_keys}")
-        st.caption(f"DEBUG bypass: {bp_raw}")
-    except Exception as _e:
-        st.caption(f"DEBUG secrets error: {_e}")
-
     # ── テスト用バイパス ──
     bypass = _bypass_email()
     if bypass:
