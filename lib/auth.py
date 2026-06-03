@@ -6,8 +6,29 @@ import streamlit as st
 from .sheets import get_user, user_is_active
 
 
+def _bypass_email() -> str | None:
+    """secrets の [bypass] enable=true なら指定 email を返す。
+    テスト/E2E 用。本番では secrets から消すこと。"""
+    try:
+        bp = st.secrets.get("bypass") if hasattr(st.secrets, "get") else None
+        if bp is None and "bypass" in st.secrets:
+            bp = st.secrets["bypass"]
+        if not bp:
+            return None
+        enable = bp.get("enable") if hasattr(bp, "get") else None
+        email = bp.get("email") if hasattr(bp, "get") else None
+        if enable and email:
+            return str(email)
+    except Exception:
+        pass
+    return None
+
+
 def current_user_email() -> str | None:
     """ログイン中ユーザーの email を返す（未ログインなら None）。"""
+    bypass = _bypass_email()
+    if bypass:
+        return bypass
     if not hasattr(st, "user") or not st.user.is_logged_in:
         return None
     return getattr(st.user, "email", None)
@@ -16,6 +37,17 @@ def current_user_email() -> str | None:
 def require_login(provider: str = "google") -> dict | None:
     """ログイン必須ガード。users シート照合まで含めて済ます。
     返り値: 認可済みユーザー行 (dict) または None（ボタンを表示して停止）。"""
+
+    # ── テスト用バイパス ──
+    bypass = _bypass_email()
+    if bypass:
+        st.sidebar.warning(f"🧪 bypass mode: {bypass}")
+        user = get_user(bypass)
+        if not user_is_active(user):
+            st.error(f"bypass email '{bypass}' が users シートに登録されていないか active=FALSE です")
+            st.stop()
+        return user
+
     if not hasattr(st, "login"):
         st.error("この Streamlit には st.login() がありません。1.42 以上にアップグレードしてください。")
         st.stop()
@@ -41,5 +73,7 @@ def require_login(provider: str = "google") -> dict | None:
 
 
 def logout_button():
+    if _bypass_email():
+        return
     if st.user.is_logged_in and st.sidebar.button("🚪 ログアウト"):
         st.logout()
