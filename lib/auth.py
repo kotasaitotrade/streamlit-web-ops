@@ -19,13 +19,11 @@ def _bypass_email() -> str | None:
             return None
         # URL クエリで上書き（bypass enable 時のみ有効）
         try:
-            qp = dict(st.query_params)
-            st.caption(f"DEBUG query_params: {qp}")
-            as_user = qp.get("as_user")
+            as_user = st.query_params.get("as_user")
             if as_user:
                 return str(as_user)
-        except Exception as _e:
-            st.caption(f"DEBUG query_params error: {_e}")
+        except Exception:
+            pass
         email = bp.get("email") if hasattr(bp, "get") else None
         if email:
             return str(email)
