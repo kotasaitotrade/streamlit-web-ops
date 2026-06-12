@@ -838,7 +838,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
     """2.写真撮影済み → 出品登録(FNSKU) → FNSKUラベルPDF → FBA納品プラン → 3.発送待ち
     戻り値: (log_lines, fnsku_pdf_bytes, shipment_summary_list)
     """
-    from sp_api.api import FulfillmentInbound, ListingsItems
+    from sp_api.api import ListingsItems
     from sp_api.base import Marketplaces
     from datetime import datetime
 
@@ -891,7 +891,6 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         item_name = ""
         if not dry_run:
             try:
-                body = {
                 image_urls = _get_image_urls_for_sku(t["sku"])
                 body = _listing_body(
                     asin=t["asin"], sku=t["sku"], price=t["price"],
@@ -951,92 +950,28 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
     log(f"  → {len(items_for_pdf)} ページ生成 (FNSKU取得: {ok}件)")
 
     # ─── ③ FBA 納品プラン作成 ────────────────────────────────
-    log("=== ③ FBA 納品プラン作成 ===")
-    try:
-        address = _ship_from_address(account_name)
-        log(f"  → 発送元: {address['Name']} / {address['AddressLine1']}")
-    except Exception as e:
-        log(f"  → 住所エラー: {e}")
-        log(f"  ※ Streamlit Secrets に [{account_name}_address] を追加してください")
-        return logs, fnsku_pdf, []
-
-    plan_items = [
-        {"SellerSKU": t["sku"], "ASIN": t["asin"],
-         "Condition": t["condition_fba"], "Quantity": 1}
-        for t in targets
-    ]
-
-    if dry_run:
-        log(f"  → [DRY] {len(plan_items)} 件のFBAプラン作成をスキップ")
-        for t in targets:
-            log(f"    {t['kanri_id']} / {t['sku']} ({t['condition_fba']})")
-        return logs, fnsku_pdf, []
-
-    from sp_api.api import FulfillmentInboundV0
-    fba_api = FulfillmentInboundV0(credentials=_sp_creds(), marketplace=Marketplaces.JP)
-    try:
-        plan_resp = fba_api.plans({
-            "ShipFromAddress":    address,
-            "ShipToCountryCode":  "JP",
-            "LabelPrepPreference": "SELLER_LABEL",
-            "InboundShipmentPlanRequestItems": plan_items,
-        })
-        plans = plan_resp.payload.get("InboundShipmentPlans", [])
-        log(f"  → 納品プラン {len(plans)} 件")
-    except Exception as e:
-        log(f"  → FBAプラン作成エラー: {e}")
-        return logs, fnsku_pdf, []
-
-    today = datetime.now().strftime("%Y%m%d")
-    sku_to_target = {t["sku"]: t for t in targets}
-    shipment_summary = []
-
-    for plan in plans:
-        dest_fc    = plan.get("DestinationFulfillmentCenterId", "")
-        ship_to    = plan.get("ShipToAddress", {})
-        plan_skus  = plan.get("Items", [])
-        shipment_id = plan["ShipmentId"]
-        log(f"  → Shipment {shipment_id} / FC: {dest_fc} ({len(plan_skus)}件)")
-        log(f"    送付先: {ship_to.get('AddressLine1','')}, {ship_to.get('City','')}")
-        try:
-            fba_api.create_shipment(
-                shipment_id=shipment_id,
-                data={
-                    "InboundShipmentHeader": {
-                        "ShipmentName": f"センリツ_{account_name}_{today}",
-                        "ShipFromAddress": address,
-                        "DestinationFulfillmentCenterId": dest_fc,
-                        "ShipmentStatus": "WORKING",
-                        "LabelPrepPreference": "SELLER_LABEL",
-                        "AreCasesRequired": False,
-                    },
-                    "InboundShipmentItems": [
-                        {"SellerSKU": item["SellerSKU"], "QuantityShipped": 1}
-                        for item in plan_skus
-                    ],
-                    "MarketplaceId": _marketplace_id(),
-                },
-            )
-            for item in plan_skus:
-                sku = item["SellerSKU"]
-                if sku in sku_to_target:
-                    t = sku_to_target[sku]
-                    _update_cell(t["sheet_row"], "D", "3.発送待ち", spreadsheet_id)
-                    _update_cell(t["sheet_row"], "V", shipment_id, spreadsheet_id)
-                    log(f"    [{t['kanri_id']}] → 3.発送待ち")
-            shipment_summary.append({
-                "shipment_id": shipment_id,
-                "dest_fc":     dest_fc,
-                "address":     f"{ship_to.get('AddressLine1','')} {ship_to.get('City','')}",
-                "count":       len(plan_skus),
-            })
-        except Exception as e:
-            log(f"  → Shipment作成エラー: {e}")
+    # ③ ステータス更新（出品登録完了分を「3.発送待ち」へ）
+    log("=== ③ ステータス更新 ===")
+    if not dry_run:
+        updated = 0
+        for it in items_for_pdf:
+            if not it.get("fnsku") or it["fnsku"] == "X00000DRY":
+                continue
+            sku = it["sku"]
+            matched = [t for t in targets if t["sku"] == sku]
+            for t in matched:
+                _update_cell(t["sheet_row"], "D", "3.発送待ち", spreadsheet_id)
+                log(f"  [{t['kanri_id']}] → 3.発送待ち")
+                updated += 1
+        log(f"  → {updated} 件更新完了")
+        log("  ※ FBA 納品プランは Seller Central から手動で作成してください")
+        log("    https://sellercentral.amazon.co.jp/fba/sendtoamazon")
+    else:
+        log(f"  → [DRY] {len(targets)} 件 → 3.発送待ち（スキップ）")
 
     log("=== 完了 ===")
-    log("FNSKUラベルを印刷して商品に貼り、梱包して発送してください。")
-    log("発送後、Seller Central でキャリア・箱サイズを登録してください。")
-    return logs, fnsku_pdf, shipment_summary
+    log("FNSKUラベルを印刷して商品に貼り、梱包後に Seller Central で FBA 納品プランを作成してください。")
+    return logs, fnsku_pdf, []
 
 
 # ============================================================
@@ -1045,7 +980,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
 
 def run_receipt_check(spreadsheet_id=None):
     """generator: 3.発送待ち → Amazon 受取確認 → 3.出品済み に更新。"""
-    from sp_api.api import FulfillmentInbound
+    from sp_api.api import FulfillmentInboundV0
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
@@ -1070,7 +1005,6 @@ def run_receipt_check(spreadsheet_id=None):
         yield "確認対象なし。終了します。"
         return
 
-    from sp_api.api import FulfillmentInboundV0
     fba_api = FulfillmentInboundV0(credentials=_sp_creds(), marketplace=Marketplaces.JP)
 
     shipments: dict = {}
