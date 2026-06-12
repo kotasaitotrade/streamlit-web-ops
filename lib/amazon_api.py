@@ -834,6 +834,140 @@ def _generate_labels_pdf_from_items(items_for_pdf: list) -> bytes:
     return buf.getvalue()
 
 
+def _fba_get_access_token() -> str:
+    """LWA からアクセストークンを取得"""
+    import requests as _req
+    c = _sp_creds()
+    r = _req.post("https://api.amazon.com/auth/o2/token", data={
+        "grant_type": "refresh_token",
+        "refresh_token": c["refresh_token"],
+        "client_id": c["lwa_app_id"],
+        "client_secret": c["lwa_client_secret"],
+    }, timeout=10)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+
+def _fba_wait_op(base_url, headers, op_id, log_fn, timeout=90):
+    """FBA v2024 非同期オペレーション完了待ち。成功なら True"""
+    import requests as _req, time as _time
+    for _ in range(timeout):
+        r = _req.get(f"{base_url}/operations/{op_id}", headers=headers, timeout=10)
+        if r.status_code == 200:
+            st = r.json().get("operationStatus", "")
+            if st == "SUCCESS":
+                return True
+            if st == "FAILED":
+                log_fn(f"    オペレーション失敗: {r.json().get('operationProblems', '')}")
+                return False
+        _time.sleep(1)
+    log_fn("    オペレーションタイムアウト")
+    return False
+
+
+def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None:
+    """FBA Inbound v2024-03-20 でプランを作成し、納品プランIDを返す"""
+    import requests as _req
+    from datetime import datetime as _dt
+
+    BASE = "https://sellingpartnerapi-fe.amazon.com/inbound/fba/2024-03-20"
+
+    try:
+        access_token = _fba_get_access_token()
+    except Exception as e:
+        log_fn(f"  → トークン取得エラー: {e}")
+        return None
+
+    headers = {
+        "x-amz-access-token": access_token,
+        "Content-Type": "application/json",
+    }
+
+    # 発送元住所（Streamlit Secrets から: {account_name}_address セクション）
+    try:
+        addr = dict(st.secrets.get(f"{account_name}_address", {}))
+    except Exception:
+        addr = {}
+
+    if not addr.get("name") or not addr.get("phone"):
+        log_fn(f"  → 発送元住所が未設定。Secrets の [{account_name}_address] に name / phone を追加してください")
+        return None
+
+    source_address = {
+        "name":                 addr["name"],
+        "phoneNumber":          addr["phone"],
+        "addressLine1":         addr.get("address_line1", ""),
+        "city":                 addr.get("city", ""),
+        "postalCode":           addr.get("postal_code", ""),
+        "stateOrProvinceCode":  addr.get("state", "Tokyo"),
+        "countryCode":          "JP",
+    }
+    if addr.get("address_line2"):
+        source_address["addressLine2"] = addr["address_line2"]
+
+    plan_items = [
+        {"labelOwner": "SELLER", "msku": it["sku"], "prepOwner": "SELLER", "quantity": 1}
+        for it in items
+    ]
+
+    # ①プラン作成
+    plan_name = f"auto-{account_name}-{_dt.now().strftime('%Y%m%d-%H%M')}"
+    log_fn(f"  プラン作成中: {len(plan_items)} 件 …")
+    r = _req.post(f"{BASE}/inboundPlans", headers=headers, json={
+        "destinationMarketplaces": [_marketplace_id()],
+        "items": plan_items,
+        "name": plan_name,
+        "sourceAddress": source_address,
+    }, timeout=30)
+
+    if r.status_code != 202:
+        log_fn(f"  → エラー: {r.status_code} {r.text[:300]}")
+        return None
+
+    data = r.json()
+    plan_id = data["inboundPlanId"]
+    log_fn(f"  → プランID: {plan_id}")
+    _fba_wait_op(BASE, headers, data["operationId"], log_fn)
+
+    # ②パッキングオプション生成 → 確定
+    log_fn("  パッキングオプション生成中 …")
+    r2 = _req.post(f"{BASE}/inboundPlans/{plan_id}/packingOptions", headers=headers, json={}, timeout=15)
+    if r2.status_code == 202:
+        _fba_wait_op(BASE, headers, r2.json()["operationId"], log_fn)
+
+    r3 = _req.get(f"{BASE}/inboundPlans/{plan_id}/packingOptions", headers=headers, timeout=15)
+    pack_opts = r3.json().get("packingOptions", []) if r3.status_code == 200 else []
+    if pack_opts:
+        opt_id = pack_opts[0]["packingOptionId"]
+        r4 = _req.post(f"{BASE}/inboundPlans/{plan_id}/packingOptions/{opt_id}/confirmation",
+                       headers=headers, json={}, timeout=15)
+        if r4.status_code == 202:
+            _fba_wait_op(BASE, headers, r4.json()["operationId"], log_fn)
+        log_fn(f"  → パッキング確定: {opt_id}")
+
+    # ③配置オプション生成 → 手数料最安を確定
+    log_fn("  配置オプション生成中 …")
+    r5 = _req.post(f"{BASE}/inboundPlans/{plan_id}/placementOptions", headers=headers, json={}, timeout=15)
+    if r5.status_code == 202:
+        _fba_wait_op(BASE, headers, r5.json()["operationId"], log_fn, timeout=120)
+
+    r6 = _req.get(f"{BASE}/inboundPlans/{plan_id}/placementOptions", headers=headers, timeout=15)
+    placements = r6.json().get("placementOptions", []) if r6.status_code == 200 else []
+    if placements:
+        best = min(
+            placements,
+            key=lambda x: float(x.get("fees", {}).get("totalAmount", {}).get("value", 999999)),
+        )
+        p_id = best["placementOptionId"]
+        r7 = _req.post(f"{BASE}/inboundPlans/{plan_id}/placementOptions/{p_id}/confirmation",
+                       headers=headers, json={}, timeout=15)
+        if r7.status_code == 202:
+            _fba_wait_op(BASE, headers, r7.json()["operationId"], log_fn)
+        log_fn(f"  → 配置確定: {p_id}")
+
+    return plan_id
+
+
 def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None):
     """2.写真撮影済み → 出品登録(FNSKU) → FNSKUラベルPDF → FBA納品プラン → 3.発送待ち
     戻り値: (log_lines, fnsku_pdf_bytes, shipment_summary_list)
@@ -949,10 +1083,17 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
     ok = sum(1 for it in items_for_pdf if it["fnsku"] and it["fnsku"] != "X00000DRY")
     log(f"  → {len(items_for_pdf)} ページ生成 (FNSKU取得: {ok}件)")
 
-    # ─── ③ FBA 納品プラン作成 ────────────────────────────────
-    # ③ ステータス更新（出品登録完了分を「3.発送待ち」へ）
-    log("=== ③ ステータス更新 ===")
+    # ─── ③ FBA 納品プラン作成（v2024-03-20）────────────────────
+    log("=== ③ FBA 納品プラン作成 ===")
+    plan_id = None
     if not dry_run:
+        fba_items = [it for it in items_for_pdf if it.get("fnsku") and it["fnsku"] != "X00000DRY"]
+        if fba_items:
+            plan_id = _fba_create_plan_v2024(account_name, fba_items, log)
+        else:
+            log("  → FNSKU 取得済みアイテムなし。スキップ。")
+
+        # ステータス更新（FBA プラン成否に関わらず FNSKU 取得済みは発送待ちへ）
         updated = 0
         for it in items_for_pdf:
             if not it.get("fnsku") or it["fnsku"] == "X00000DRY":
@@ -964,13 +1105,17 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
                 log(f"  [{t['kanri_id']}] → 3.発送待ち")
                 updated += 1
         log(f"  → {updated} 件更新完了")
-        log("  ※ FBA 納品プランは Seller Central から手動で作成してください")
-        log("    https://sellercentral.amazon.co.jp/fba/sendtoamazon")
+
+        if plan_id:
+            log(f"  ✅ FBA 納品プラン作成完了: {plan_id}")
+            log(f"  → Seller Central で続きを確認: https://sellercentral.amazon.co.jp/fba/sendtoamazon")
+        else:
+            log("  ⚠️ FBA プランの自動作成に失敗。Seller Central から手動で作成してください。")
+            log("    https://sellercentral.amazon.co.jp/fba/sendtoamazon")
     else:
         log(f"  → [DRY] {len(targets)} 件 → 3.発送待ち（スキップ）")
 
     log("=== 完了 ===")
-    log("FNSKUラベルを印刷して商品に貼り、梱包後に Seller Central で FBA 納品プランを作成してください。")
     return logs, fnsku_pdf, []
 
 
