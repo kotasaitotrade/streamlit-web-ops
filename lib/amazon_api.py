@@ -119,7 +119,7 @@ def _read_rows(col_end: str = "T", spreadsheet_id=None) -> list[tuple[int, list]
     """(sheet_row, row_data) のリストを返す。sheet_row は 1-indexed。"""
     result = _sheets_service().spreadsheets().values().get(
         spreadsheetId=_ssid(spreadsheet_id),
-        range=f"{SHEET_NAME}!A2:{col_end}1000",
+        range=f"{SHEET_NAME}!A2:{col_end}4000",
     ).execute()
     rows = result.get("values", [])
     return [(i + 2, row) for i, row in enumerate(rows)]
@@ -130,7 +130,7 @@ def get_status_counts(spreadsheet_id=None) -> dict:
     from collections import Counter
     result = _sheets_service().spreadsheets().values().get(
         spreadsheetId=_ssid(spreadsheet_id),
-        range=f"{SHEET_NAME}!D2:D1000",
+        range=f"{SHEET_NAME}!D2:D4000",
     ).execute()
     rows = result.get("values", [])
     return dict(Counter(r[0].strip() for r in rows if r))
