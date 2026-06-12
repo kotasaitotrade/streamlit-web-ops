@@ -298,6 +298,8 @@ def run_auto_listing(dry_run: bool = True, spreadsheet_id=None):
 
     for t in targets:
         yield f"[{t['kanri_id']}] ASIN={t['asin']} | {t['price']}円 | {t['condition_type']}"
+        image_urls = _get_image_urls_for_sku(t["sku"])
+        yield f"  → 画像: {len(image_urls)}枚{' (Drive フォルダなし)' if not image_urls else ''}"
         if dry_run:
             yield f"  → [DRY] note={t['condition_note'][:40] if t['condition_note'] else '(なし)'}..."
             success += 1
@@ -317,6 +319,14 @@ def run_auto_listing(dry_run: bool = True, spreadsheet_id=None):
             }
             if t["condition_note"]:
                 body["attributes"]["condition_note"] = [{"value": t["condition_note"][:1000]}]
+            if image_urls:
+                body["attributes"]["main_product_image_locator"] = [
+                    {"media_location": image_urls[0]}
+                ]
+                for i, url in enumerate(image_urls[1:], 1):
+                    body["attributes"][f"other_product_image_locator_{i}"] = [
+                        {"media_location": url}
+                    ]
             resp = api.put_listings_item(
                 sellerId=_seller_id(), sku=t["sku"],
                 marketplaceIds=[_marketplace_id()], body=body,
@@ -472,6 +482,29 @@ def _get_fnsku(listings_api, sku: str):
     except Exception:
         pass
     return "", ""
+
+
+def _get_image_urls_for_sku(sku: str) -> list[str]:
+    """SKU フォルダ内の画像を公開設定にして URL リストを返す（最大6件）。
+    Drive ファイルに "anyone reader" permission を付与し、
+    Amazon がダウンロードできる直接 URL を構築する。"""
+    folder_id = _find_sku_folder(sku)
+    if not folder_id:
+        return []
+    images = _list_images(folder_id, max_count=6)
+    svc = _drive_service()
+    urls = []
+    for img in images:
+        try:
+            svc.permissions().create(
+                fileId=img["id"],
+                body={"type": "anyone", "role": "reader"},
+                fields="id",
+            ).execute()
+        except Exception:
+            pass  # すでに公開済み or エラーは無視
+        urls.append(f"https://drive.google.com/uc?export=download&id={img['id']}")
+    return urls
 
 
 def _find_sku_folder(sku: str):
