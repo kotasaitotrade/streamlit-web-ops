@@ -92,15 +92,23 @@ def _drive_service():
 
 SHEET_NAME = "商品管理"
 
-COL_KANRI_ID = 0
-COL_STATUS   = 3
-COL_SHIIRE   = 4
-COL_HANBAI   = 9
-COL_SKU      = 14
-COL_ASIN     = 15
-COL_STATE    = 17
-COL_NOTE_VG  = 18
-COL_NOTE_G   = 19
+COL_KANRI_ID    = 0
+COL_STATUS      = 3
+COL_SHIIRE      = 4
+COL_HANBAI      = 9
+COL_SKU         = 14
+COL_ASIN        = 15
+COL_STATE       = 17
+COL_NOTE_VG     = 18
+COL_NOTE_G      = 19
+COL_SHIPMENT_ID = 20   # U: FBA Shipment ID
+
+CONDITION_FBA_MAP = {
+    "used_very_good":  "UsedVeryGood",
+    "used_good":       "UsedGood",
+    "used_acceptable": "UsedAcceptable",
+    "new":             "NewItem",
+}
 
 
 def _cell(row: list, col: int) -> str:
@@ -762,3 +770,316 @@ def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, 
     log(f"PDF 生成完了: {len(items_for_pdf)} ページ")
     log(f"FNSKU 取得: {ok} 件 / 未取得: {len(items_for_pdf) - ok} 件")
     return buf.getvalue(), logs
+
+
+# ============================================================
+# FBA 納品プラン作成
+# ============================================================
+
+def _ship_from_address(account_name: str) -> dict:
+    """secrets の {account_name}_address から SP-API 用住所 dict を返す。"""
+    sec = st.secrets[f"{account_name}_address"]
+    return {
+        "Name":         sec["name"],
+        "AddressLine1": sec["address_line1"],
+        "City":         sec["city"],
+        "PostalCode":   sec["postal_code"],
+        "CountryCode":  sec.get("country_code", "JP"),
+    }
+
+
+def _generate_labels_pdf_from_items(items_for_pdf: list) -> bytes:
+    """item dict リストから FNSKU ラベル PDF を生成して bytes を返す。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rlcanvas
+    from datetime import datetime
+    if not items_for_pdf:
+        return b""
+    today = datetime.now().strftime("%Y-%m-%d")
+    buf = io.BytesIO()
+    c = rlcanvas.Canvas(buf, pagesize=A4)
+    for item in items_for_pdf:
+        _draw_page(c, item, today)
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None):
+    """2.写真撮影済み → 出品登録(FNSKU) → FNSKUラベルPDF → FBA納品プラン → 3.発送待ち
+    戻り値: (log_lines, fnsku_pdf_bytes, shipment_summary_list)
+    """
+    from sp_api.api import FulfillmentInbound, ListingsItems
+    from sp_api.base import Marketplaces
+    from datetime import datetime
+
+    logs = []
+    def log(msg): logs.append(msg)
+
+    log("スプレッドシート読み込み中...")
+    all_rows = _read_rows("T", spreadsheet_id)
+
+    targets = []
+    for sheet_row, row in all_rows:
+        if _cell(row, COL_STATUS) != "2.写真撮影済み":
+            continue
+        asin      = _cell(row, COL_ASIN)
+        sku       = _cell(row, COL_SKU)
+        price_str = _cell(row, COL_HANBAI)
+        state     = _cell(row, COL_STATE)
+        if not asin or not sku or not price_str:
+            continue
+        try:
+            price = int(float(price_str.replace(",", "").replace("¥", "")))
+        except ValueError:
+            continue
+        ct, note_col = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+        targets.append({
+            "sheet_row":     sheet_row,
+            "kanri_id":      _cell(row, COL_KANRI_ID),
+            "asin":          asin,
+            "sku":           sku,
+            "price":         price,
+            "condition_type": ct,
+            "condition_note": _cell(row, note_col),
+            "condition_fba":  CONDITION_FBA_MAP.get(ct, "UsedGood"),
+            "state_raw":     state,
+        })
+
+    log(f"対象: {len(targets)} 件（2.写真撮影済み）")
+    if not targets:
+        log("対象なし。終了します。")
+        return logs, b"", []
+
+    # ─── ① 出品登録（FNSKU取得）──────────────────────────────
+    log("=== ① 出品登録（FNSKU取得）===")
+    listings_api = ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    items_for_pdf = []
+
+    for t in targets:
+        log(f"[{t['kanri_id']}] {t['sku']} 出品登録中...")
+        fnsku = ""
+        item_name = ""
+        if not dry_run:
+            try:
+                body = {
+                    "productType": "PRODUCT",
+                    "requirements": "LISTING",
+                    "attributes": {
+                        "condition_type":            [{"value": t["condition_type"]}],
+                        "merchant_suggested_asin":   [{"value": t["asin"]}],
+                        "fulfillment_availability":  [{"fulfillment_channel_code": "AMAZON_JP"}],
+                        "purchasable_offer": [
+                            {"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["price"])}]}]}
+                        ],
+                    },
+                }
+                if t["condition_note"]:
+                    body["attributes"]["condition_note"] = [{"value": t["condition_note"][:1000]}]
+                image_urls = _get_image_urls_for_sku(t["sku"])
+                if image_urls:
+                    body["attributes"]["main_product_image_locator"] = [{"media_location": image_urls[0]}]
+                    for i, url in enumerate(image_urls[1:], 1):
+                        body["attributes"][f"other_product_image_locator_{i}"] = [{"media_location": url}]
+                listings_api.put_listings_item(
+                    sellerId=_seller_id(), sku=t["sku"],
+                    marketplaceIds=[_marketplace_id()], body=body,
+                )
+                time.sleep(1)
+                fnsku, item_name = _get_fnsku(listings_api, t["sku"])
+                if not fnsku:
+                    log(f"  → FNSKU未取得。3秒後にリトライ...")
+                    time.sleep(3)
+                    fnsku, item_name = _get_fnsku(listings_api, t["sku"])
+                log(f"  → FNSKU: {fnsku or '未取得'}")
+            except Exception as e:
+                log(f"  → エラー: {e}")
+        else:
+            log(f"  → [DRY] ASIN={t['asin']} | {t['price']}円 | {t['condition_type']}")
+            fnsku = "X00000DRY"
+
+        # Drive 画像取得（PDF用）
+        images = []
+        try:
+            folder_id = _find_sku_folder(t["sku"])
+            if folder_id:
+                for f in _list_images(folder_id):
+                    try:
+                        images.append(_download_image(f["id"]))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        ct = t["condition_type"]
+        items_for_pdf.append({
+            "kanri_id":     t["kanri_id"],
+            "sku":          t["sku"],
+            "asin":         t["asin"],
+            "price":        t["price"],
+            "fnsku":        fnsku,
+            "item_name":    item_name,
+            "condition_type": ct,
+            "condition_jp": _CONDITION_JP.get(ct, ct),
+            "images":       images,
+        })
+        log(f"  → 画像: {len(images)}枚")
+        time.sleep(0.5)
+
+    # ─── ② FNSKUラベル PDF 生成 ──────────────────────────────
+    log("=== ② FNSKUラベル PDF 生成 ===")
+    fnsku_pdf = _generate_labels_pdf_from_items(items_for_pdf)
+    ok = sum(1 for it in items_for_pdf if it["fnsku"] and it["fnsku"] != "X00000DRY")
+    log(f"  → {len(items_for_pdf)} ページ生成 (FNSKU取得: {ok}件)")
+
+    # ─── ③ FBA 納品プラン作成 ────────────────────────────────
+    log("=== ③ FBA 納品プラン作成 ===")
+    try:
+        address = _ship_from_address(account_name)
+        log(f"  → 発送元: {address['Name']} / {address['AddressLine1']}")
+    except Exception as e:
+        log(f"  → 住所エラー: {e}")
+        log(f"  ※ Streamlit Secrets に [{account_name}_address] を追加してください")
+        return logs, fnsku_pdf, []
+
+    plan_items = [
+        {"SellerSKU": t["sku"], "ASIN": t["asin"],
+         "Condition": t["condition_fba"], "Quantity": 1}
+        for t in targets
+    ]
+
+    if dry_run:
+        log(f"  → [DRY] {len(plan_items)} 件のFBAプラン作成をスキップ")
+        for t in targets:
+            log(f"    {t['kanri_id']} / {t['sku']} ({t['condition_fba']})")
+        return logs, fnsku_pdf, []
+
+    fba_api = FulfillmentInbound(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    try:
+        plan_resp = fba_api.create_inbound_shipment_plan(body={
+            "ShipFromAddress":    address,
+            "ShipToCountryCode":  "JP",
+            "LabelPrepPreference": "SELLER_LABEL",
+            "InboundShipmentPlanRequestItems": plan_items,
+        })
+        plans = plan_resp.payload.get("InboundShipmentPlans", [])
+        log(f"  → 納品プラン {len(plans)} 件")
+    except Exception as e:
+        log(f"  → FBAプラン作成エラー: {e}")
+        return logs, fnsku_pdf, []
+
+    today = datetime.now().strftime("%Y%m%d")
+    sku_to_target = {t["sku"]: t for t in targets}
+    shipment_summary = []
+
+    for plan in plans:
+        dest_fc    = plan.get("DestinationFulfillmentCenterId", "")
+        ship_to    = plan.get("ShipToAddress", {})
+        plan_skus  = plan.get("Items", [])
+        shipment_id = plan["ShipmentId"]
+        log(f"  → Shipment {shipment_id} / FC: {dest_fc} ({len(plan_skus)}件)")
+        log(f"    送付先: {ship_to.get('AddressLine1','')}, {ship_to.get('City','')}")
+        try:
+            fba_api.create_inbound_shipment(
+                shipment_id=shipment_id,
+                body={
+                    "InboundShipmentHeader": {
+                        "ShipmentName": f"センリツ_{account_name}_{today}",
+                        "ShipFromAddress": address,
+                        "DestinationFulfillmentCenterId": dest_fc,
+                        "ShipmentStatus": "WORKING",
+                        "LabelPrepPreference": "SELLER_LABEL",
+                        "AreCasesRequired": False,
+                    },
+                    "InboundShipmentItems": [
+                        {"SellerSKU": item["SellerSKU"], "QuantityShipped": 1}
+                        for item in plan_skus
+                    ],
+                    "MarketplaceId": _marketplace_id(),
+                },
+            )
+            for item in plan_skus:
+                sku = item["SellerSKU"]
+                if sku in sku_to_target:
+                    t = sku_to_target[sku]
+                    _update_cell(t["sheet_row"], "D", "3.発送待ち", spreadsheet_id)
+                    _update_cell(t["sheet_row"], "U", shipment_id, spreadsheet_id)
+                    log(f"    [{t['kanri_id']}] → 3.発送待ち")
+            shipment_summary.append({
+                "shipment_id": shipment_id,
+                "dest_fc":     dest_fc,
+                "address":     f"{ship_to.get('AddressLine1','')} {ship_to.get('City','')}",
+                "count":       len(plan_skus),
+            })
+        except Exception as e:
+            log(f"  → Shipment作成エラー: {e}")
+
+    log("=== 完了 ===")
+    log("FNSKUラベルを印刷して商品に貼り、梱包して発送してください。")
+    log("発送後、Seller Central でキャリア・箱サイズを登録してください。")
+    return logs, fnsku_pdf, shipment_summary
+
+
+# ============================================================
+# FBA 受取確認
+# ============================================================
+
+def run_receipt_check(spreadsheet_id=None):
+    """generator: 3.発送待ち → Amazon 受取確認 → 3.出品済み に更新。"""
+    from sp_api.api import FulfillmentInbound
+    from sp_api.base import Marketplaces
+
+    yield "スプレッドシート読み込み中..."
+    all_rows = _read_rows("U", spreadsheet_id)
+
+    targets = []
+    for sheet_row, row in all_rows:
+        if _cell(row, COL_STATUS) != "3.発送待ち":
+            continue
+        shipment_id = _cell(row, COL_SHIPMENT_ID)
+        if not shipment_id:
+            continue
+        targets.append({
+            "sheet_row":   sheet_row,
+            "kanri_id":    _cell(row, COL_KANRI_ID),
+            "sku":         _cell(row, COL_SKU),
+            "shipment_id": shipment_id,
+        })
+
+    yield f"確認対象: {len(targets)} 件（3.発送待ち）"
+    if not targets:
+        yield "確認対象なし。終了します。"
+        return
+
+    fba_api = FulfillmentInbound(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+
+    shipments: dict = {}
+    for t in targets:
+        shipments.setdefault(t["shipment_id"], []).append(t)
+
+    updated = 0
+    for shipment_id, items in shipments.items():
+        yield f"[{shipment_id}] 確認中... ({len(items)}件)"
+        try:
+            resp = fba_api.get_shipments(
+                query_type="SHIPMENT",
+                marketplace_id=_marketplace_id(),
+                shipment_ids=[shipment_id],
+            )
+            data = resp.payload.get("ShipmentData", [])
+            if not data:
+                yield "  → データなし（まだ Amazon に届いていない可能性があります）"
+                continue
+            status = data[0].get("ShipmentStatus", "UNKNOWN")
+            yield f"  → ステータス: {status}"
+            if status in ("RECEIVING", "CLOSED", "CHECKED_IN"):
+                for t in items:
+                    _update_cell(t["sheet_row"], "D", "3.出品済み", spreadsheet_id)
+                    yield f"  → [{t['kanri_id']}] 3.出品済みに更新"
+                    updated += 1
+            else:
+                yield f"  → 受取前（{status}）— 発送後しばらく待ってから再確認してください"
+        except Exception as e:
+            yield f"  → エラー: {e}"
+
+    yield f"完了: {updated} 件を 3.出品済み に更新しました"

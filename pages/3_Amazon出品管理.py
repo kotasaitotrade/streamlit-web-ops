@@ -107,11 +107,12 @@ def _stream_logs(gen, placeholder):
 # ============================================================
 # タブ
 # ============================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 ASIN取得",
     "📤 自動出品",
     "💴 価格調整",
     "🏷️ FNSKUラベル",
+    "🚚 FBA納品",
 ])
 
 
@@ -247,3 +248,81 @@ with tab4:
             st.caption(f"📄 {filename}　{len(pdf_bytes) // 1024} KB")
         else:
             st.info("生成対象がありませんでした。ステータス '3.出品済み' の行を確認してください。")
+
+
+# ── タブ5: FBA納品 ───────────────────────────────────────────
+with tab5:
+    st.subheader("🚚 FBA納品自動化")
+    st.markdown("""
+ステータス **`2.写真撮影済み`** の商品を対象に、以下をまとめて実行します。
+
+1. Amazon に出品登録（FNSKU 取得）
+2. FNSKUラベル PDF 生成
+3. FBA 納品プラン作成（送付先 FC の確定）
+4. ステータスを **`3.発送待ち`** に更新
+
+PDF をダウンロード・印刷して商品に貼付し、梱包・発送後に **「受取確認」** ボタンを押してください。
+""")
+
+    st.divider()
+    st.markdown("#### ① FBA納品プラン作成")
+
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        dry5 = st.checkbox("ドライラン", value=True, key="dry5")
+    run_fba = c2.button(
+        "▶ ドライラン実行" if dry5 else "▶ 本番実行",
+        key="run_fba",
+        type="secondary" if dry5 else "primary",
+        use_container_width=True,
+    )
+    if not dry5:
+        st.warning("⚠️ 本番モード: SP-API に出品登録・FBA納品プランを作成します。")
+
+    if run_fba:
+        log_area5 = st.empty()
+        label = "ドライラン" if dry5 else "本番"
+        with st.spinner(f"FBA納品処理中 [{label}]..."):
+            logs5, pdf5, summary5 = amazon.run_fba_inbound(
+                account_name=account, dry_run=dry5, spreadsheet_id=ss_id
+            )
+
+        log_html5 = "\n".join(logs5[-120:])
+        log_area5.markdown(f'<div class="log-box">{log_html5}</div>', unsafe_allow_html=True)
+
+        if pdf5:
+            st.success("✅ FNSKUラベル PDF を生成しました")
+            fname = f"fnsku_fba_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+            st.download_button(
+                label="⬇️ FNSKUラベル PDF をダウンロード",
+                data=pdf5,
+                file_name=fname,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+        if summary5:
+            st.markdown("**FBA 納品プラン一覧**")
+            for s in summary5:
+                st.info(
+                    f"📦 ShipmentID: `{s['shipment_id']}`  "
+                    f"| FC: `{s['dest_fc']}`  "
+                    f"| 送付先: {s['address']}  "
+                    f"| {s['count']}件"
+                )
+
+        if not dry5:
+            _get_status_counts.clear()
+
+    st.divider()
+    st.markdown("#### ② 受取確認（発送後に押す）")
+    st.caption("ステータス `3.発送待ち` の商品について Amazon の受取状況を確認し、受取済みなら `3.出品済み` に更新します。")
+
+    run_receipt = st.button("🔍 受取確認を実行", key="run_receipt", type="primary")
+
+    if run_receipt:
+        log_area_r = st.empty()
+        with st.spinner("Amazon の受取状況を確認中..."):
+            lines_r = _stream_logs(amazon.run_receipt_check(spreadsheet_id=ss_id), log_area_r)
+        st.success("✅ 完了しました")
+        _get_status_counts.clear()
