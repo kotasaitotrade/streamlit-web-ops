@@ -101,7 +101,7 @@ COL_ASIN        = 15
 COL_STATE       = 17
 COL_NOTE_VG     = 18
 COL_NOTE_G      = 19
-COL_SHIPMENT_ID = 20   # U: FBA Shipment ID
+COL_SHIPMENT_ID = 21   # V: FBA Shipment ID (U列は「型番など」で使用中のため)
 
 CONDITION_FBA_MAP = {
     "used_very_good":  "UsedVeryGood",
@@ -1003,7 +1003,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
                 if sku in sku_to_target:
                     t = sku_to_target[sku]
                     _update_cell(t["sheet_row"], "D", "3.発送待ち", spreadsheet_id)
-                    _update_cell(t["sheet_row"], "U", shipment_id, spreadsheet_id)
+                    _update_cell(t["sheet_row"], "V", shipment_id, spreadsheet_id)
                     log(f"    [{t['kanri_id']}] → 3.発送待ち")
             shipment_summary.append({
                 "shipment_id": shipment_id,
