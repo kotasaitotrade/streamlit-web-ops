@@ -45,6 +45,11 @@ def _marketplace_id() -> str:
 def _spreadsheet_id() -> str:
     return st.secrets["amazon_config"]["spreadsheet_id"]
 
+
+def _ssid(sid=None) -> str:
+    """spreadsheet_id 引数が渡されていればそれを使い、なければ secrets のデフォルト値を使う。"""
+    return sid if sid else _spreadsheet_id()
+
 def _drive_folder_id() -> str:
     return st.secrets["amazon_config"]["drive_image_folder_id"]
 
@@ -102,30 +107,30 @@ def _cell(row: list, col: int) -> str:
     return row[col].strip() if col < len(row) and row[col] else ""
 
 
-def _read_rows(col_end: str = "T") -> list[tuple[int, list]]:
+def _read_rows(col_end: str = "T", spreadsheet_id=None) -> list[tuple[int, list]]:
     """(sheet_row, row_data) のリストを返す。sheet_row は 1-indexed。"""
     result = _sheets_service().spreadsheets().values().get(
-        spreadsheetId=_spreadsheet_id(),
+        spreadsheetId=_ssid(spreadsheet_id),
         range=f"{SHEET_NAME}!A2:{col_end}200",
     ).execute()
     rows = result.get("values", [])
     return [(i + 2, row) for i, row in enumerate(rows)]
 
 
-def get_status_counts() -> dict:
+def get_status_counts(spreadsheet_id=None) -> dict:
     """ステータス別件数を返す（サイドバー表示用）。"""
     from collections import Counter
     result = _sheets_service().spreadsheets().values().get(
-        spreadsheetId=_spreadsheet_id(),
+        spreadsheetId=_ssid(spreadsheet_id),
         range=f"{SHEET_NAME}!D2:D300",
     ).execute()
     rows = result.get("values", [])
     return dict(Counter(r[0].strip() for r in rows if r))
 
 
-def _update_cell(row: int, col_letter: str, value: str):
+def _update_cell(row: int, col_letter: str, value: str, spreadsheet_id=None):
     _sheets_service().spreadsheets().values().update(
-        spreadsheetId=_spreadsheet_id(),
+        spreadsheetId=_ssid(spreadsheet_id),
         range=f"{SHEET_NAME}!{col_letter}{row}",
         valueInputOption="RAW",
         body={"values": [[value]]},
@@ -168,13 +173,13 @@ def _build_queries(text: str) -> list[str]:
     return list(dict.fromkeys(queries))
 
 
-def run_asin_lookup(dry_run: bool = False):
+def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
     """generator: ASIN 取得ログを yield する。"""
     from sp_api.api import CatalogItems
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("P")
+    all_rows = _read_rows("P", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:
@@ -223,7 +228,7 @@ def run_asin_lookup(dry_run: bool = False):
 
         if found:
             if not dry_run:
-                _update_cell(sheet_row, "P", found)
+                _update_cell(sheet_row, "P", found, spreadsheet_id)
                 yield f"  → シート書き込み完了"
             else:
                 yield f"  → [DRY] 書き込みスキップ"
@@ -252,13 +257,13 @@ _CONDITION_MAP = {
 }
 
 
-def run_auto_listing(dry_run: bool = True):
+def run_auto_listing(dry_run: bool = True, spreadsheet_id=None):
     """generator: 自動出品ログを yield する。"""
     from sp_api.api import ListingsItems
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("T")
+    all_rows = _read_rows("T", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:
@@ -316,7 +321,7 @@ def run_auto_listing(dry_run: bool = True):
                 sellerId=_seller_id(), sku=t["sku"],
                 marketplaceIds=[_marketplace_id()], body=body,
             )
-            _update_cell(t["sheet_row"], "D", "3.出品済み")
+            _update_cell(t["sheet_row"], "D", "3.出品済み", spreadsheet_id)
             yield f"  → 出品完了 / ステータス更新"
             success += 1
         except Exception as e:
@@ -349,13 +354,13 @@ def _buybox(products_api, asin: str):
     return None
 
 
-def run_auto_reprice(dry_run: bool = True):
+def run_auto_reprice(dry_run: bool = True, spreadsheet_id=None):
     """generator: 価格調整ログを yield する。"""
     from sp_api.api import ListingsItems, Products
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("P")
+    all_rows = _read_rows("P", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:
@@ -431,7 +436,7 @@ def run_auto_reprice(dry_run: bool = True):
                                  "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(new_price)}]}]}]}],
                 },
             )
-            _update_cell(t["sheet_row"], "J", str(new_price))
+            _update_cell(t["sheet_row"], "J", str(new_price), spreadsheet_id)
             yield f"  → Amazon + シート更新完了"
             updated += 1
         except Exception as e:
@@ -609,7 +614,7 @@ def _draw_page(c, item: dict, today: str):
     c.drawRightString(W - margin, 11 * mm, today)
 
 
-def run_fnsku_labels(target_sku: str = "") -> tuple[bytes, list[str]]:
+def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, list[str]]:
     """FNSKUラベル PDF を生成して (bytes, log_lines) を返す。"""
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as rlcanvas
@@ -623,7 +628,7 @@ def run_fnsku_labels(target_sku: str = "") -> tuple[bytes, list[str]]:
         logs.append(msg)
 
     log("スプレッドシート読み込み中...")
-    all_rows = _read_rows("R")
+    all_rows = _read_rows("R", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:

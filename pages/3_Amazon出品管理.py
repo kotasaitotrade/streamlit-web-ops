@@ -37,24 +37,37 @@ st.markdown("""
 st.title("📦 Amazon出品管理")
 st.caption("ASIN自動取得 / 自動出品 / 価格調整 / FNSKUラベル生成")
 
+# ============================================================
+# アカウント選択
+# ============================================================
+ACCOUNTS = {
+    "sato": "1Xb66vv997dWX9CIofuPNY23tuIQwoNFmm-hNBLbnBYo",
+    "kudo": "1keLLdpDRu2l9AjHyM6qRe_W8FFH_Jtl-isb1XFp8MzA",
+}
+
+account = st.selectbox("アカウント", list(ACCOUNTS.keys()), key="account_select")
+ss_id = ACCOUNTS[account]
+
+st.divider()
+
 
 # ============================================================
 # サイドバー: スプレッドシート概要
 # ============================================================
 @st.cache_data(ttl=60)
-def _get_status_counts():
+def _get_status_counts(spreadsheet_id: str):
     try:
-        return amazon.get_status_counts(), None
+        return amazon.get_status_counts(spreadsheet_id), None
     except Exception as e:
         return {}, str(e)
 
 
-def _show_sidebar():
-    counts, err = _get_status_counts()
+def _show_sidebar(spreadsheet_id: str):
+    counts, err = _get_status_counts(spreadsheet_id)
     if err:
         st.sidebar.warning(f"スプシ読み込みエラー: {err[:60]}")
         return
-    st.sidebar.markdown("### 📊 スプレッドシート状況")
+    st.sidebar.markdown(f"### 📊 {account} スプレッドシート状況")
     order = [
         ("3.出品済み",       "🟢", "出品済み"),
         ("3.納品済み",       "🟡", "納品済み（出品待ち）"),
@@ -74,7 +87,7 @@ def _show_sidebar():
         st.rerun()
 
 
-_show_sidebar()
+_show_sidebar(ss_id)
 
 
 # ============================================================
@@ -114,7 +127,7 @@ Amazon カタログを検索して ASIN を自動書き込みします。
     if run_asin:
         log_area = st.empty()
         with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
-            lines = _stream_logs(amazon.run_asin_lookup(dry_run=False), log_area)
+            lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
         st.success("✅ 完了しました")
         _get_status_counts.clear()
 
@@ -142,7 +155,7 @@ with tab2:
         log_area = st.empty()
         label = "ドライラン" if dry2 else "本番"
         with st.spinner(f"出品処理中 [{label}]..."):
-            lines = _stream_logs(amazon.run_auto_listing(dry_run=dry2), log_area)
+            lines = _stream_logs(amazon.run_auto_listing(dry_run=dry2, spreadsheet_id=ss_id), log_area)
         st.success("✅ 完了しました")
         if not dry2:
             _get_status_counts.clear()
@@ -178,7 +191,7 @@ with tab3:
         log_area = st.empty()
         label = "ドライラン" if dry3 else "本番"
         with st.spinner(f"価格調整中 [{label}]... (1件あたり約2秒)"):
-            lines = _stream_logs(amazon.run_auto_reprice(dry_run=dry3), log_area)
+            lines = _stream_logs(amazon.run_auto_reprice(dry_run=dry3, spreadsheet_id=ss_id), log_area)
         st.success("✅ 完了しました")
         if not dry3:
             _get_status_counts.clear()
@@ -214,7 +227,7 @@ with tab4:
     if run_labels:
         sku_filter = target_sku.strip()
         with st.spinner("PDF 生成中... (SP-API と Drive にアクセスします)"):
-            pdf_bytes, logs = amazon.run_fnsku_labels(target_sku=sku_filter)
+            pdf_bytes, logs = amazon.run_fnsku_labels(target_sku=sku_filter, spreadsheet_id=ss_id)
 
         log_html = "\n".join(logs[-60:])
         st.markdown(f'<div class="log-box">{log_html}</div>', unsafe_allow_html=True)
