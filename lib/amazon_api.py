@@ -42,6 +42,51 @@ def _seller_id() -> str:
 def _marketplace_id() -> str:
     return st.secrets["sp_api"]["marketplace_id"]
 
+
+def _get_product_type(asin: str) -> str:
+    """CatalogItems API で ASIN の productType を取得。失敗時は 'PRODUCT' を返す。"""
+    try:
+        from sp_api.api import CatalogItems
+        from sp_api.base import Marketplaces
+        cat = CatalogItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+        resp = cat.get_catalog_item(
+            asin=asin,
+            marketplaceIds=[_marketplace_id()],
+            includedData=["productTypes"],
+        )
+        pts = resp.payload.get("productTypes", [])
+        if pts:
+            return pts[0].get("productType", "PRODUCT")
+    except Exception:
+        pass
+    return "PRODUCT"
+
+
+def _listing_body(asin: str, sku: str, price: int, condition_type: str,
+                  condition_note: str = "", image_urls: list = None) -> dict:
+    """put_listings_item 用リクエストボディを組み立てる。"""
+    product_type = _get_product_type(asin)
+    body: dict = {
+        "productType": product_type,
+        "requirements": "LISTING_OFFER_ONLY",
+        "attributes": {
+            "condition_type":            [{"value": condition_type}],
+            "merchant_suggested_asin":   [{"value": asin}],
+            "fulfillment_availability":  [{"fulfillment_channel_code": "AMAZON_JP"}],
+            "purchasable_offer": [
+                {"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(price)}]}]}
+            ],
+            "supplier_declared_dg_hz_regulation": [{"value": "not_applicable"}],
+        },
+    }
+    if condition_note:
+        body["attributes"]["condition_note"] = [{"value": condition_note[:1000]}]
+    if image_urls:
+        body["attributes"]["main_product_image_locator"] = [{"media_location": image_urls[0]}]
+        for i, url in enumerate(image_urls[1:], 1):
+            body["attributes"][f"other_product_image_locator_{i}"] = [{"media_location": url}]
+    return body
+
 def _spreadsheet_id() -> str:
     return st.secrets["amazon_config"]["spreadsheet_id"]
 
@@ -313,28 +358,12 @@ def run_auto_listing(dry_run: bool = True, spreadsheet_id=None):
             success += 1
             continue
         try:
-            body = {
-                "productType": "PRODUCT",
-                "requirements": "LISTING",
-                "attributes": {
-                    "condition_type": [{"value": t["condition_type"]}],
-                    "merchant_suggested_asin": [{"value": t["asin"]}],
-                    "fulfillment_availability": [{"fulfillment_channel_code": "AMAZON_JP"}],
-                    "purchasable_offer": [
-                        {"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["price"])}]}]}
-                    ],
-                },
-            }
-            if t["condition_note"]:
-                body["attributes"]["condition_note"] = [{"value": t["condition_note"][:1000]}]
-            if image_urls:
-                body["attributes"]["main_product_image_locator"] = [
-                    {"media_location": image_urls[0]}
-                ]
-                for i, url in enumerate(image_urls[1:], 1):
-                    body["attributes"][f"other_product_image_locator_{i}"] = [
-                        {"media_location": url}
-                    ]
+            body = _listing_body(
+                asin=t["asin"], sku=t["sku"], price=t["price"],
+                condition_type=t["condition_type"],
+                condition_note=t["condition_note"],
+                image_urls=image_urls,
+            )
             resp = api.put_listings_item(
                 sellerId=_seller_id(), sku=t["sku"],
                 marketplaceIds=[_marketplace_id()], body=body,
@@ -863,24 +892,13 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         if not dry_run:
             try:
                 body = {
-                    "productType": "PRODUCT",
-                    "requirements": "LISTING",
-                    "attributes": {
-                        "condition_type":            [{"value": t["condition_type"]}],
-                        "merchant_suggested_asin":   [{"value": t["asin"]}],
-                        "fulfillment_availability":  [{"fulfillment_channel_code": "AMAZON_JP"}],
-                        "purchasable_offer": [
-                            {"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["price"])}]}]}
-                        ],
-                    },
-                }
-                if t["condition_note"]:
-                    body["attributes"]["condition_note"] = [{"value": t["condition_note"][:1000]}]
                 image_urls = _get_image_urls_for_sku(t["sku"])
-                if image_urls:
-                    body["attributes"]["main_product_image_locator"] = [{"media_location": image_urls[0]}]
-                    for i, url in enumerate(image_urls[1:], 1):
-                        body["attributes"][f"other_product_image_locator_{i}"] = [{"media_location": url}]
+                body = _listing_body(
+                    asin=t["asin"], sku=t["sku"], price=t["price"],
+                    condition_type=t["condition_type"],
+                    condition_note=t["condition_note"],
+                    image_urls=image_urls,
+                )
                 listings_api.put_listings_item(
                     sellerId=_seller_id(), sku=t["sku"],
                     marketplaceIds=[_marketplace_id()], body=body,
@@ -954,9 +972,10 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             log(f"    {t['kanri_id']} / {t['sku']} ({t['condition_fba']})")
         return logs, fnsku_pdf, []
 
-    fba_api = FulfillmentInbound(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    from sp_api.api import FulfillmentInboundV0
+    fba_api = FulfillmentInboundV0(credentials=_sp_creds(), marketplace=Marketplaces.JP)
     try:
-        plan_resp = fba_api.create_inbound_shipment_plan(body={
+        plan_resp = fba_api.plans({
             "ShipFromAddress":    address,
             "ShipToCountryCode":  "JP",
             "LabelPrepPreference": "SELLER_LABEL",
@@ -980,9 +999,9 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         log(f"  → Shipment {shipment_id} / FC: {dest_fc} ({len(plan_skus)}件)")
         log(f"    送付先: {ship_to.get('AddressLine1','')}, {ship_to.get('City','')}")
         try:
-            fba_api.create_inbound_shipment(
+            fba_api.create_shipment(
                 shipment_id=shipment_id,
-                body={
+                data={
                     "InboundShipmentHeader": {
                         "ShipmentName": f"センリツ_{account_name}_{today}",
                         "ShipFromAddress": address,
@@ -1051,7 +1070,8 @@ def run_receipt_check(spreadsheet_id=None):
         yield "確認対象なし。終了します。"
         return
 
-    fba_api = FulfillmentInbound(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    from sp_api.api import FulfillmentInboundV0
+    fba_api = FulfillmentInboundV0(credentials=_sp_creds(), marketplace=Marketplaces.JP)
 
     shipments: dict = {}
     for t in targets:
@@ -1062,9 +1082,9 @@ def run_receipt_check(spreadsheet_id=None):
         yield f"[{shipment_id}] 確認中... ({len(items)}件)"
         try:
             resp = fba_api.get_shipments(
-                query_type="SHIPMENT",
-                marketplace_id=_marketplace_id(),
-                shipment_ids=[shipment_id],
+                QueryType="SHIPMENT",
+                MarketplaceId=_marketplace_id(),
+                ShipmentIdList=[shipment_id],
             )
             data = resp.payload.get("ShipmentData", [])
             if not data:
