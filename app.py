@@ -43,4 +43,14 @@ else:
                 st.page_link("pages/1_ツール実行.py", label="▶ 実行する", icon="🚀")
 
 st.divider()
+st.subheader("📦 Amazon出品管理")
+with st.container(border=True):
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        st.markdown("**ASIN自動取得 / 自動出品 / 価格調整 / FNSKUラベル生成**")
+        st.caption("SP-API + Google Drive 連携。ドライランで安全確認後に本番実行できます。")
+    with col_b:
+        st.page_link("pages/3_Amazon出品管理.py", label="▶ 開く", icon="📦", use_container_width=True)
+
+st.divider()
 st.page_link("pages/2_実行履歴.py", label="📋 実行履歴を見る")
