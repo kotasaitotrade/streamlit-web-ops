@@ -333,6 +333,8 @@ def run_auto_listing(dry_run: bool = True, spreadsheet_id=None):
             )
             _update_cell(t["sheet_row"], "D", "3.出品済み", spreadsheet_id)
             yield f"  → 出品完了 / ステータス更新"
+            moved = _move_sku_folder_to_bk(t["sku"])
+            yield f"  → 画像フォルダ: {'BKへ移動済み' if moved else 'フォルダなし（スキップ）'}"
             success += 1
         except Exception as e:
             yield f"  → エラー: {e}"
@@ -482,6 +484,30 @@ def _get_fnsku(listings_api, sku: str):
     except Exception:
         pass
     return "", ""
+
+
+def _bk_folder_id() -> str:
+    try:
+        return st.secrets["amazon_config"]["bk_image_folder_id"]
+    except Exception:
+        return "1NTaFxO5l1hTOtqBX0PYyFPFZ88Eb6WbC"
+
+
+def _move_sku_folder_to_bk(sku: str) -> bool:
+    """SKU フォルダを BK フォルダへ移動する。成功すれば True。"""
+    folder_id = _find_sku_folder(sku)
+    if not folder_id:
+        return False
+    try:
+        _drive_service().files().update(
+            fileId=folder_id,
+            addParents=_bk_folder_id(),
+            removeParents=_drive_folder_id(),
+            fields="id,parents",
+        ).execute()
+        return True
+    except Exception:
+        return False
 
 
 def _get_image_urls_for_sku(sku: str) -> list[str]:
