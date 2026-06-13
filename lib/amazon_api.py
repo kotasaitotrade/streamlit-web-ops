@@ -1108,10 +1108,8 @@ def get_fba_transportation_options(
     plan_id: str,
     placement_option_id: str,
     shipment_ids: list,
-    boxes: list,
 ) -> dict:
-    """輸送オプションを生成・取得する。
-    boxes: [{"length_cm": float, "width_cm": float, "height_cm": float, "weight_kg": float}]
+    """輸送オプションを生成・取得する（NON_PARTNERED_SPD 固定）。
     Returns: {"options": [...], "error": None} or {"options": [], "error": "message"}
     """
     import requests as _req
@@ -1134,27 +1132,11 @@ def get_fba_transportation_options(
     except Exception:
         email = ""
 
-    cartons = [
-        {
-            "dimensions": {
-                "height": b["height_cm"],
-                "length": b["length_cm"],
-                "width": b["width_cm"],
-                "unitOfMeasurement": "CM",
-            },
-            "weight": {"value": b["weight_kg"], "unit": "KG"},
-        }
-        for b in boxes
-    ]
-
     configurations = []
     for ship_id in shipment_ids:
         cfg = {
             "shipmentId": ship_id,
-            "shippingConfiguration": {
-                "shipmentType": "SP",
-                "cartons": cartons,
-            },
+            "shippingMode": "NON_PARTNERED_SPD",
         }
         if email:
             cfg["contactInformation"] = {"email": email}

@@ -325,19 +325,6 @@ with tab5:
     _placement_id = placement_id_input.strip() or placement_id_val
     _shipment_ids = [s.strip() for s in shipment_ids_input.split(",") if s.strip()] or shipment_ids_val
 
-    st.markdown("**箱の情報を入力してください**")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        num_boxes = st.number_input("箱の個数", min_value=1, value=1, step=1, key="fba_num_boxes")
-    with c2:
-        box_length = st.number_input("長さ (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_length")
-    with c3:
-        box_width = st.number_input("幅 (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_width")
-    with c4:
-        box_height = st.number_input("高さ (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_height")
-    with c5:
-        box_weight = st.number_input("重量 (kg/箱)", min_value=0.1, value=5.0, step=0.1, key="fba_box_weight")
-
     if not _plan_id:
         st.caption("💡 ① を実行するとプランIDが自動入力されます。または上の欄に手動で入力してください。")
     get_transport = st.button(
@@ -351,18 +338,12 @@ with tab5:
         if not _plan_id or not _placement_id or not _shipment_ids:
             st.error("プランID・配置オプションID・シップメントIDをすべて入力してください（① を先に実行してください）。")
         else:
-            boxes = [
-                {"length_cm": box_length, "width_cm": box_width,
-                 "height_cm": box_height, "weight_kg": box_weight}
-                for _ in range(int(num_boxes))
-            ]
             with st.spinner("輸送オプションを取得中..."):
                 result = amazon.get_fba_transportation_options(
                     account_name=account,
                     plan_id=_plan_id,
                     placement_option_id=_placement_id,
                     shipment_ids=_shipment_ids,
-                    boxes=boxes,
                 )
             if result["error"]:
                 st.error(f"エラー: {result['error']}")
@@ -377,13 +358,24 @@ with tab5:
     if transport_options:
         st.markdown("**輸送方法を選択してください**")
 
+        _MODE_JP = {
+            "NON_PARTNERED_SPD": "自社手配・小口発送（ヤマト/佐川）",
+            "PARTNERED_SPD": "Amazon提携・小口発送",
+            "NON_PARTNERED_LTL": "自社手配・大口発送",
+            "PARTNERED_LTL": "Amazon提携・大口発送",
+        }
+
         def _option_label(opt):
-            carrier = opt.get("carrier", {}).get("name", "不明")
             mode = opt.get("shippingMode", "")
+            carrier = opt.get("carrier", {}).get("name", "")
             cost = opt.get("quote", {}).get("cost", {})
             amount = cost.get("amount", 0)
-            code = cost.get("code", "JPY")
-            return f"{carrier}  {mode}  {code} {amount:,.0f}"
+            label = _MODE_JP.get(mode, mode or "不明")
+            if carrier:
+                label += f" ({carrier})"
+            if amount:
+                label += f" — JPY {amount:,.0f}"
+            return label
 
         option_labels = [_option_label(o) for o in transport_options]
         selected_label = st.radio("輸送オプション", option_labels, key="fba_transport_radio")
