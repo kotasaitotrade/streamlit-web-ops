@@ -325,6 +325,18 @@ with tab5:
     _placement_id = placement_id_input.strip() or placement_id_val
     _shipment_ids = [s.strip() for s in shipment_ids_input.split(",") if s.strip()] or shipment_ids_val
 
+    # 発送可能期間（readyToShipWindow）入力
+    from datetime import date, timedelta
+    c_date1, c_date2 = st.columns(2)
+    with c_date1:
+        ship_start_date = st.date_input(
+            "発送可能開始日", value=date.today() + timedelta(days=1), key="fba_ship_start"
+        )
+    with c_date2:
+        ship_end_date = st.date_input(
+            "発送可能終了日", value=date.today() + timedelta(days=14), key="fba_ship_end"
+        )
+
     if not _plan_id:
         st.caption("💡 ① を実行するとプランIDが自動入力されます。または上の欄に手動で入力してください。")
     get_transport = st.button(
@@ -338,12 +350,16 @@ with tab5:
         if not _plan_id or not _placement_id or not _shipment_ids:
             st.error("プランID・配置オプションID・シップメントIDをすべて入力してください（① を先に実行してください）。")
         else:
+            ship_start_iso = f"{ship_start_date.isoformat()}T00:00:00Z"
+            ship_end_iso = f"{ship_end_date.isoformat()}T23:59:59Z"
             with st.spinner("輸送オプションを取得中..."):
                 result = amazon.get_fba_transportation_options(
                     account_name=account,
                     plan_id=_plan_id,
                     placement_option_id=_placement_id,
                     shipment_ids=_shipment_ids,
+                    ready_to_ship_start=ship_start_iso,
+                    ready_to_ship_end=ship_end_iso,
                 )
             if result["error"]:
                 st.error(f"エラー: {result['error']}")
@@ -363,6 +379,8 @@ with tab5:
             "PARTNERED_SPD": "Amazon提携・小口発送",
             "NON_PARTNERED_LTL": "自社手配・大口発送",
             "PARTNERED_LTL": "Amazon提携・大口発送",
+            "FREIGHT_LTL": "大口発送（フレート）",
+            "FREIGHT_SPD": "小口発送（フレート）",
         }
 
         def _option_label(opt):
@@ -371,18 +389,35 @@ with tab5:
             cost = opt.get("quote", {}).get("cost", {})
             amount = cost.get("amount", 0)
             label = _MODE_JP.get(mode, mode or "不明")
-            if carrier:
-                label += f" ({carrier})"
+            if carrier and carrier != "Other":
+                label += f" [{carrier}]"
             if amount:
                 label += f" — JPY {amount:,.0f}"
+            pre = opt.get("preconditions", [])
+            if pre:
+                label += f" ⚠️要事前設定"
             return label
 
         option_labels = [_option_label(o) for o in transport_options]
+        # preconditions があるオプションは注意表示
+        has_precond = any(o.get("preconditions") for o in transport_options)
+        if has_precond:
+            st.warning(
+                "⚠️ 一部のオプションに事前設定（配送枠確認など）が必要です。"
+                "通常の小口発送（ヤマト/佐川）は Seller Central から直接手配してください。"
+            )
+
         selected_label = st.radio("輸送オプション", option_labels, key="fba_transport_radio")
         selected_idx = option_labels.index(selected_label)
         selected_opt = transport_options[selected_idx]
 
-        confirm_transport = st.button("▶ 輸送方法を確定する", key="confirm_transport", type="primary")
+        # 選択したオプションの preconditions 表示
+        sel_pre = selected_opt.get("preconditions", [])
+        if sel_pre:
+            st.info(f"このオプションには事前設定が必要です: {', '.join(sel_pre)}")
+
+        confirm_transport = st.button("▶ 輸送方法を確定する", key="confirm_transport", type="primary",
+                                      disabled=bool(sel_pre))
         if confirm_transport:
             selections = [
                 {

@@ -1108,11 +1108,15 @@ def get_fba_transportation_options(
     plan_id: str,
     placement_option_id: str,
     shipment_ids: list,
+    ready_to_ship_start: str = "",
+    ready_to_ship_end: str = "",
 ) -> dict:
     """輸送オプションを生成・取得する（NON_PARTNERED_SPD 固定）。
+    ready_to_ship_start/end: ISO 8601 UTC (例: "2026-06-15T00:00:00Z")。省略時は翌日〜14日後。
     Returns: {"options": [...], "error": None} or {"options": [], "error": "message"}
     """
     import requests as _req
+    from datetime import datetime, timezone, timedelta
 
     BASE = "https://sellingpartnerapi-fe.amazon.com/inbound/fba/2024-03-20"
 
@@ -1132,11 +1136,22 @@ def get_fba_transportation_options(
     except Exception:
         email = ""
 
+    # readyToShipWindow（必須）: 指定なければ翌日〜14日後
+    now = datetime.now(timezone.utc)
+    if not ready_to_ship_start:
+        ready_to_ship_start = (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not ready_to_ship_end:
+        ready_to_ship_end = (now + timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     configurations = []
     for ship_id in shipment_ids:
         cfg = {
             "shipmentId": ship_id,
             "shippingMode": "NON_PARTNERED_SPD",
+            "readyToShipWindow": {
+                "start": ready_to_ship_start,
+                "end": ready_to_ship_end,
+            },
         }
         if email:
             cfg["contactInformation"] = {"email": email}
@@ -1163,16 +1178,23 @@ def get_fba_transportation_options(
 
     if r.status_code != 202:
         errs = r.json().get("errors", [{}])
-        msg = errs[0].get("message", r.text[:300]) if errs else r.text[:300]
-        return {"options": [], "error": f"{r.status_code}: {msg}"}
+        # WARNING だけで ERROR がなければ続行（LTL pallet 警告など）
+        actual_errors = [e for e in errs if e.get("message", "").startswith("ERROR:")]
+        if actual_errors:
+            msg = actual_errors[0].get("message", r.text[:300])
+            return {"options": [], "error": f"{r.status_code}: {msg}"}
+        # WARNING のみ → 続行（202 相当として扱う）
 
-    op_id = r.json().get("operationId", "")
+    op_id = r.json().get("operationId", "") if r.status_code == 202 else ""
     if op_id:
         _fba_wait_op(BASE, headers, op_id, lambda _: None, timeout=60)
 
+    # GET に placementOptionId クエリパラメータが必須
     r2 = _req.get(
         f"{BASE}/inboundPlans/{plan_id}/transportationOptions",
-        headers=headers, timeout=15,
+        headers=headers,
+        params={"placementOptionId": placement_option_id},
+        timeout=15,
     )
     if r2.status_code != 200:
         return {"options": [], "error": f"一覧取得エラー: {r2.status_code} {r2.text[:200]}"}
