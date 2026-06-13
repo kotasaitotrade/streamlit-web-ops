@@ -126,11 +126,16 @@ Amazon カタログを検索して ASIN を自動書き込みします。
     run_asin = st.button("▶ 実行する", key="run_asin", type="primary")
 
     if run_asin:
-        log_area = st.empty()
-        with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
-            lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
-        st.success("✅ 完了しました")
-        _get_status_counts.clear()
+        st.warning("⚠️ スプレッドシートの ASIN 列を上書きします。よろしいですか？")
+        c_ok, c_cancel = st.columns([1, 4])
+        confirmed_asin = c_ok.button("✅ 実行する", key="run_asin_confirm", type="primary")
+        c_cancel.button("キャンセル", key="run_asin_cancel")
+        if confirmed_asin:
+            log_area = st.empty()
+            with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
+                lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
+            st.success("✅ 完了しました")
+            _get_status_counts.clear()
 
 
 # ── タブ2: 自動出品 ──────────────────────────────────────────
@@ -318,7 +323,7 @@ with tab5:
     st.markdown("#### ③ 受取確認（発送後に押す）")
     st.caption("ステータス `3.発送待ち` の商品について Amazon の受取状況を確認し、受取済みなら `3.出品済み` に更新します。")
 
-    run_receipt = st.button("🔍 受取確認を実行", key="run_receipt", type="primary")
+    run_receipt = st.button("🔍 受取確認を実行", key="run_receipt", type="secondary")
 
     if run_receipt:
         log_area_r = st.empty()
