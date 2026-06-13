@@ -616,15 +616,23 @@ def _draw_page(c, item: dict, today: str):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.lib.utils import ImageReader
     from PIL import Image as PILImage
+    import os
 
-    FONT = "HeiseiKakuGo-W5"
-    try:
-        pdfmetrics.registerFont(UnicodeCIDFont(FONT))
-    except Exception:
-        pass
+    FONT = "NotoSansJP"
+    if FONT not in pdfmetrics.getRegisteredFontNames():
+        # assets/fonts/ → Streamlit Cloud の /usr/share/fonts/... の順に探す
+        candidates = [
+            os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "NotoSansJP.ttf"),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                pdfmetrics.registerFont(TTFont(FONT, path))
+                break
 
     W, H = A4
     margin = 18 * mm
@@ -640,7 +648,7 @@ def _draw_page(c, item: dict, today: str):
     c.drawString(margin + 160, H - 21 * mm, f"ASIN:  {item['asin']}")
     c.drawString(margin + 310, H - 21 * mm, f"FNSKU: {item['fnsku'] or '(未取得)'}")
     c.drawString(margin,       H - 29 * mm,
-                 f"コンディション: {item['condition_jp']}   ¥{item['price']:,}   {today}")
+                 f"コンディション: {item['condition_jp']}   {item['price']:,}円   {today}")
 
     # 商品名
     c.setFillColorRGB(0, 0, 0)
