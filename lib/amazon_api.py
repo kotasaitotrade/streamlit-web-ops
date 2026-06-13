@@ -873,11 +873,9 @@ def _fba_wait_op(base_url, headers, op_id, log_fn, timeout=90):
     return False
 
 
-def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None:
+def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> dict | None:
     """FBA Inbound v2024-03-20 でプランを作成（①プラン → ②パッキング → ③配置確定）
-
-    ④輸送方法の確定は SP-API スコープ制限 (403) のため API 経由では不可。
-    Seller Central で手動完了が必要: https://sellercentral.amazon.co.jp/fba/inbound/index.html
+    Returns: {"plan_id": str, "placement_option_id": str|None, "shipment_ids": list} or None
     """
     import requests as _req
     from datetime import datetime as _dt
@@ -985,6 +983,7 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
     r6 = _req.get(f"{BASE}/inboundPlans/{plan_id}/placementOptions", headers=headers, timeout=15)
     placements = r6.json().get("placementOptions", []) if r6.status_code == 200 else []
     ship_ids = []
+    p_id = None
     if placements:
         best = min(
             placements,
@@ -1011,11 +1010,9 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
             if confirm_id:
                 log_fn(f"  📋 出荷確認ID: {confirm_id}")
 
-    log_fn("  ✅ プラン作成完了！")
-    log_fn("  ➡️  Seller Central で輸送方法を選択して納品を完了してください（①②③は完了済み）。")
-    log_fn("      https://sellercentral.amazon.co.jp/fba/inbound/index.html")
+    log_fn("  ✅ プラン作成完了！（配置確定まで完了）")
 
-    return plan_id
+    return {"plan_id": plan_id, "placement_option_id": p_id, "shipment_ids": ship_ids}
 
 
 def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None):
@@ -1135,13 +1132,15 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
 
     # ─── ③ FBA 納品プラン作成（v2024-03-20）────────────────────
     log("=== ③ FBA 納品プラン作成 ===")
-    plan_id = None
+    plan_result_obj = None
     if not dry_run:
         fba_items = [it for it in items_for_pdf if it.get("fnsku") and it["fnsku"] != "X00000DRY"]
         if fba_items:
-            plan_id = _fba_create_plan_v2024(account_name, fba_items, log)
+            plan_result_obj = _fba_create_plan_v2024(account_name, fba_items, log)
         else:
             log("  → FNSKU 取得済みアイテムなし。スキップ。")
+
+        plan_id = plan_result_obj["plan_id"] if plan_result_obj else None
 
         # ステータス更新（FBA プラン成否に関わらず FNSKU 取得済みは発送待ちへ）
         updated = 0
@@ -1158,7 +1157,6 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
 
         if plan_id:
             log(f"  ✅ FBA 納品プラン作成完了: {plan_id}")
-            log(f"  → Seller Central で続きを確認: https://sellercentral.amazon.co.jp/fba/sendtoamazon")
         else:
             log("  ⚠️ FBA プランの自動作成に失敗。Seller Central から手動で作成してください。")
             log("    https://sellercentral.amazon.co.jp/fba/sendtoamazon")
@@ -1166,11 +1164,171 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         log(f"  → [DRY] {len(targets)} 件 → 3.発送待ち（スキップ）")
 
     log("=== 完了 ===")
-    return logs, fnsku_pdf, []
+    return logs, fnsku_pdf, plan_result_obj or {}
 
 
 # ============================================================
 # FBA 受取確認
+# ============================================================
+# FBA 輸送方法（Transportation Options）
+# ============================================================
+
+def get_fba_transportation_options(
+    account_name: str,
+    plan_id: str,
+    placement_option_id: str,
+    shipment_ids: list,
+    boxes: list,
+) -> dict:
+    """輸送オプションを生成・取得する。
+    boxes: [{"length_cm": float, "width_cm": float, "height_cm": float, "weight_kg": float}]
+    Returns: {"options": [...], "error": None} or {"options": [], "error": "message"}
+    """
+    import requests as _req
+
+    BASE = "https://sellingpartnerapi-fe.amazon.com/inbound/fba/2024-03-20"
+
+    try:
+        access_token = _fba_get_access_token()
+    except Exception as e:
+        return {"options": [], "error": f"トークン取得エラー: {e}"}
+
+    headers = {
+        "x-amz-access-token": access_token,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        addr = dict(st.secrets.get(f"{account_name}_address", {}))
+        email = addr.get("email", "")
+    except Exception:
+        email = ""
+
+    cartons = [
+        {
+            "dimensions": {
+                "height": b["height_cm"],
+                "length": b["length_cm"],
+                "width": b["width_cm"],
+                "unitOfMeasurement": "CM",
+            },
+            "weight": {"value": b["weight_kg"], "unit": "KG"},
+        }
+        for b in boxes
+    ]
+
+    configurations = []
+    for ship_id in shipment_ids:
+        cfg = {
+            "shipmentId": ship_id,
+            "shippingConfiguration": {
+                "shipmentType": "SP",
+                "cartons": cartons,
+            },
+        }
+        if email:
+            cfg["contactInformation"] = {"email": email}
+        configurations.append(cfg)
+
+    body = {
+        "placementOptionId": placement_option_id,
+        "shipmentTransportationConfigurations": configurations,
+    }
+
+    r = _req.post(
+        f"{BASE}/inboundPlans/{plan_id}/transportationOptions",
+        headers=headers, json=body, timeout=30,
+    )
+
+    if r.status_code == 403:
+        return {
+            "options": [],
+            "error": (
+                "403 Forbidden: inbound_shipment_transport_write スコープが付与されていません。\n"
+                "SP-API デベロッパーコンソールでスコープ申請が必要です。"
+            ),
+        }
+
+    if r.status_code != 202:
+        errs = r.json().get("errors", [{}])
+        msg = errs[0].get("message", r.text[:300]) if errs else r.text[:300]
+        return {"options": [], "error": f"{r.status_code}: {msg}"}
+
+    op_id = r.json().get("operationId", "")
+    if op_id:
+        _fba_wait_op(BASE, headers, op_id, lambda _: None, timeout=60)
+
+    r2 = _req.get(
+        f"{BASE}/inboundPlans/{plan_id}/transportationOptions",
+        headers=headers, timeout=15,
+    )
+    if r2.status_code != 200:
+        return {"options": [], "error": f"一覧取得エラー: {r2.status_code} {r2.text[:200]}"}
+
+    return {"options": r2.json().get("transportationOptions", []), "error": None}
+
+
+def confirm_fba_transportation(
+    account_name: str,
+    plan_id: str,
+    selections: list,
+) -> dict:
+    """輸送方法を確定する。
+    selections: [{"shipment_id": str, "transportation_option_id": str}]
+    Returns: {"success": bool, "error": None or str}
+    """
+    import requests as _req
+
+    BASE = "https://sellingpartnerapi-fe.amazon.com/inbound/fba/2024-03-20"
+
+    try:
+        access_token = _fba_get_access_token()
+    except Exception as e:
+        return {"success": False, "error": f"トークン取得エラー: {e}"}
+
+    headers = {
+        "x-amz-access-token": access_token,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        addr = dict(st.secrets.get(f"{account_name}_address", {}))
+        email = addr.get("email", "")
+    except Exception:
+        email = ""
+
+    sel_list = []
+    for s in selections:
+        item = {
+            "shipmentId": s["shipment_id"],
+            "selectedTransportationOptionId": s["transportation_option_id"],
+        }
+        if email:
+            item["contactInformation"] = {"email": email}
+        sel_list.append(item)
+
+    r = _req.post(
+        f"{BASE}/inboundPlans/{plan_id}/transportationOptions/confirmation",
+        headers=headers,
+        json={"shipmentTransportationSelections": sel_list},
+        timeout=30,
+    )
+
+    if r.status_code == 403:
+        return {"success": False, "error": "403 Forbidden: スコープが付与されていません"}
+
+    if r.status_code != 202:
+        errs = r.json().get("errors", [{}])
+        msg = errs[0].get("message", r.text[:300]) if errs else r.text[:300]
+        return {"success": False, "error": f"{r.status_code}: {msg}"}
+
+    op_id = r.json().get("operationId", "")
+    if op_id:
+        _fba_wait_op(BASE, headers, op_id, lambda _: None, timeout=60)
+
+    return {"success": True, "error": None}
+
+
 # ============================================================
 
 def run_receipt_check(spreadsheet_id=None):

@@ -264,8 +264,9 @@ with tab5:
 | ステップ | 方法 |
 |---|---|
 | ① 出品登録 + FNSKUラベル PDF + 納品プラン作成 | **このページで自動実行** |
-| ② 輸送方法の選択・発送 | [Seller Central で手動](https://sellercentral.amazon.co.jp/fba/inbound/index.html) |
-| ③ 発送後 受取確認 | このページで確認 |
+| ② 輸送方法の選択・確定 | **このページで自動実行** |
+| ③ 梱包・発送 | 自宅で手動 |
+| ④ 受取確認 | このページで確認 |
 """)
 
     st.divider()
@@ -287,7 +288,7 @@ with tab5:
         log_area5 = st.empty()
         label = "ドライラン" if dry5 else "本番"
         with st.spinner(f"処理中 [{label}]..."):
-            logs5, pdf5, summary5 = amazon.run_fba_inbound(
+            logs5, pdf5, plan5 = amazon.run_fba_inbound(
                 account_name=account, dry_run=dry5, spreadsheet_id=ss_id
             )
 
@@ -305,19 +306,122 @@ with tab5:
                 use_container_width=True,
             )
 
+        if plan5 and not dry5:
+            st.session_state["fba_plan_result"] = plan5
+            st.session_state.pop("fba_transport_options", None)  # 前回の選択をリセット
+
         if not dry5:
             _get_status_counts.clear()
 
     st.divider()
-    st.markdown("#### ② 輸送方法の選択・発送（Seller Central で手動）")
-    st.info(
-        "① の実行後、納品プランの作成（プラン作成〜配置確定）は自動完了します。\n"
-        "以下のステップのみ Seller Central で手動完了してください。\n\n"
-        "1. [Seller Central → FBA 納品管理](https://sellercentral.amazon.co.jp/fba/inbound/index.html) を開く\n"
-        "2. ① で作成されたプランを選択 → **輸送方法（小口発送 SPD など）を選択**\n"
-        "3. 画面の指示に従って発送伝票を出力・梱包・発送\n\n"
-        "💡 ログに表示された **出荷確認ID** と **発送先FC住所** をご確認ください。"
+
+    # ── ② 輸送方法の選択・確定 ────────────────────────────────
+    st.markdown("#### ② 輸送方法の選択・確定（自動）")
+
+    plan_result = st.session_state.get("fba_plan_result", {})
+    plan_id_val = plan_result.get("plan_id", "")
+    placement_id_val = plan_result.get("placement_option_id", "")
+    shipment_ids_val = plan_result.get("shipment_ids", [])
+
+    # プランID 手動入力（セッションリロード後も使えるよう）
+    with st.expander("プラン情報（① 実行後に自動入力。手動入力も可）", expanded=not plan_id_val):
+        plan_id_input = st.text_input("プランID", value=plan_id_val, key="fba_plan_id_input",
+                                      placeholder="例: wf12345abc-...")
+        placement_id_input = st.text_input("配置オプションID", value=placement_id_val,
+                                           key="fba_placement_id_input")
+        shipment_ids_input = st.text_input(
+            "シップメントID（カンマ区切り）",
+            value=",".join(shipment_ids_val),
+            key="fba_shipment_ids_input",
+        )
+
+    _plan_id = plan_id_input.strip() or plan_id_val
+    _placement_id = placement_id_input.strip() or placement_id_val
+    _shipment_ids = [s.strip() for s in shipment_ids_input.split(",") if s.strip()] or shipment_ids_val
+
+    st.markdown("**箱の情報を入力してください**")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        num_boxes = st.number_input("箱の個数", min_value=1, value=1, step=1, key="fba_num_boxes")
+    with c2:
+        box_length = st.number_input("長さ (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_length")
+    with c3:
+        box_width = st.number_input("幅 (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_width")
+    with c4:
+        box_height = st.number_input("高さ (cm)", min_value=1.0, value=30.0, step=1.0, key="fba_box_height")
+    with c5:
+        box_weight = st.number_input("重量 (kg/箱)", min_value=0.1, value=5.0, step=0.1, key="fba_box_weight")
+
+    get_transport = st.button(
+        "▶ 輸送オプションを取得",
+        key="get_transport",
+        type="primary",
+        disabled=not _plan_id,
     )
+
+    if get_transport:
+        if not _plan_id or not _placement_id or not _shipment_ids:
+            st.error("プランID・配置オプションID・シップメントIDをすべて入力してください（① を先に実行してください）。")
+        else:
+            boxes = [
+                {"length_cm": box_length, "width_cm": box_width,
+                 "height_cm": box_height, "weight_kg": box_weight}
+                for _ in range(int(num_boxes))
+            ]
+            with st.spinner("輸送オプションを取得中..."):
+                result = amazon.get_fba_transportation_options(
+                    account_name=account,
+                    plan_id=_plan_id,
+                    placement_option_id=_placement_id,
+                    shipment_ids=_shipment_ids,
+                    boxes=boxes,
+                )
+            if result["error"]:
+                st.error(f"エラー: {result['error']}")
+            elif not result["options"]:
+                st.warning("輸送オプションが見つかりませんでした。")
+            else:
+                st.session_state["fba_transport_options"] = result["options"]
+                st.success(f"✅ {len(result['options'])} 件の輸送オプションを取得しました")
+
+    # オプション選択 → 確定
+    transport_options = st.session_state.get("fba_transport_options", [])
+    if transport_options:
+        st.markdown("**輸送方法を選択してください**")
+
+        def _option_label(opt):
+            carrier = opt.get("carrier", {}).get("name", "不明")
+            mode = opt.get("shippingMode", "")
+            cost = opt.get("quote", {}).get("cost", {})
+            amount = cost.get("amount", 0)
+            code = cost.get("code", "JPY")
+            return f"{carrier}  {mode}  {code} {amount:,.0f}"
+
+        option_labels = [_option_label(o) for o in transport_options]
+        selected_label = st.radio("輸送オプション", option_labels, key="fba_transport_radio")
+        selected_idx = option_labels.index(selected_label)
+        selected_opt = transport_options[selected_idx]
+
+        confirm_transport = st.button("▶ 輸送方法を確定する", key="confirm_transport", type="primary")
+        if confirm_transport:
+            selections = [
+                {
+                    "shipment_id": selected_opt.get("shipmentId", sid),
+                    "transportation_option_id": selected_opt["transportationOptionId"],
+                }
+                for sid in (_shipment_ids or [selected_opt.get("shipmentId", "")])
+            ]
+            with st.spinner("輸送方法を確定中..."):
+                conf = amazon.confirm_fba_transportation(
+                    account_name=account,
+                    plan_id=_plan_id,
+                    selections=selections,
+                )
+            if conf["error"]:
+                st.error(f"確定エラー: {conf['error']}")
+            else:
+                st.success("✅ 輸送方法を確定しました！梱包・発送に進んでください。")
+                st.session_state.pop("fba_transport_options", None)
 
     st.divider()
     st.markdown("#### ③ 受取確認（発送後に押す）")
