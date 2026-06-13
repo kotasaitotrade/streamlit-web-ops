@@ -107,9 +107,8 @@ def _stream_logs(gen, placeholder):
 # ============================================================
 # タブ
 # ============================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab3, tab4, tab5 = st.tabs([
     "🔍 ASIN取得",
-    "📤 自動出品",
     "💴 価格調整",
     "🏷️ FNSKUラベル",
     "🚚 FBA納品",
@@ -137,34 +136,6 @@ Amazon カタログを検索して ASIN を自動書き込みします。
             st.success("✅ 完了しました")
             _get_status_counts.clear()
 
-
-# ── タブ2: 自動出品 ──────────────────────────────────────────
-with tab2:
-    st.subheader("📤 自動出品")
-    st.markdown("""
-ステータスが **`3.納品済み`** の行を対象に、Amazon FBA へ出品登録します。
-成功するとステータスが **`3.出品済み`** に更新されます。
-""")
-
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        dry2 = st.checkbox("ドライラン", value=True, key="dry2")
-    run_listing = c2.button(
-        "▶ ドライラン実行" if dry2 else "▶ 本番実行",
-        key="run_listing",
-        type="secondary" if dry2 else "primary",
-    )
-    if not dry2:
-        st.warning("⚠️ 本番モード: SP-API に実際に出品リクエストを送信します。")
-
-    if run_listing:
-        log_area = st.empty()
-        label = "ドライラン" if dry2 else "本番"
-        with st.spinner(f"出品処理中 [{label}]..."):
-            lines = _stream_logs(amazon.run_auto_listing(dry_run=dry2, spreadsheet_id=ss_id), log_area)
-        st.success("✅ 完了しました")
-        if not dry2:
-            _get_status_counts.clear()
 
 
 # ── タブ3: 価格調整 ──────────────────────────────────────────
