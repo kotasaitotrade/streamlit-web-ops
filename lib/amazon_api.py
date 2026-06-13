@@ -874,7 +874,11 @@ def _fba_wait_op(base_url, headers, op_id, log_fn, timeout=90):
 
 
 def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None:
-    """FBA Inbound v2024-03-20 でプランを作成し、納品プランIDを返す"""
+    """FBA Inbound v2024-03-20 でプランを作成（①プラン → ②パッキング → ③配置確定）
+
+    ④輸送方法の確定は SP-API スコープ制限 (403) のため API 経由では不可。
+    Seller Central で手動完了が必要: https://sellercentral.amazon.co.jp/fba/inbound/index.html
+    """
     import requests as _req
     from datetime import datetime as _dt
 
@@ -913,14 +917,30 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
     if addr.get("address_line2"):
         source_address["addressLine2"] = addr["address_line2"]
 
+    # 事前チェック: prepCategory が UNKNOWN の SKU は Seller Central で設定が必要
+    skus = [it["sku"] for it in items]
+    r_prep = _req.get(f"{BASE}/items/prepDetails", headers=headers,
+        params={"mskus": ",".join(skus), "marketplaceId": _marketplace_id()}, timeout=15)
+    prep_map = {}
+    if r_prep.status_code == 200:
+        for d in r_prep.json().get("mskuPrepDetails", []):
+            prep_map[d["msku"]] = d
+    unknown_skus = [m for m, d in prep_map.items() if d.get("prepCategory", "UNKNOWN") == "UNKNOWN"]
+    if unknown_skus:
+        log_fn(f"  ⚠️ 以下の SKU はプレップカテゴリが未設定です: {', '.join(unknown_skus)}")
+        log_fn("  → Seller Central で一度手動で FBA 納品プランを作成しプレップカテゴリを設定してください。")
+        log_fn("     https://sellercentral.amazon.co.jp/fba/inbound/index.html")
+        return None
+
+    # prepOwner は "NONE"（API が SELLER/AMAZON を拒否する）
     plan_items = [
-        {"labelOwner": "SELLER", "msku": it["sku"], "prepOwner": "SELLER", "quantity": 1}
+        {"labelOwner": "SELLER", "msku": it["sku"], "prepOwner": "NONE", "quantity": 1}
         for it in items
     ]
 
     # ①プラン作成
     plan_name = f"auto-{account_name}-{_dt.now().strftime('%Y%m%d-%H%M')}"
-    log_fn(f"  プラン作成中: {len(plan_items)} 件 …")
+    log_fn(f"  ①プラン作成中: {len(plan_items)} 件 …")
     r = _req.post(f"{BASE}/inboundPlans", headers=headers, json={
         "destinationMarketplaces": [_marketplace_id()],
         "items": plan_items,
@@ -929,16 +949,19 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
     }, timeout=30)
 
     if r.status_code != 202:
-        log_fn(f"  → エラー: {r.status_code} {r.text[:300]}")
+        errs = r.json().get("errors", [{}])
+        msg = errs[0].get("message", r.text[:200]) if errs else r.text[:200]
+        log_fn(f"  → プラン作成エラー: {r.status_code} {msg}")
         return None
 
     data = r.json()
     plan_id = data["inboundPlanId"]
     log_fn(f"  → プランID: {plan_id}")
-    _fba_wait_op(BASE, headers, data["operationId"], log_fn)
+    if not _fba_wait_op(BASE, headers, data["operationId"], log_fn):
+        return None
 
     # ②パッキングオプション生成 → 確定
-    log_fn("  パッキングオプション生成中 …")
+    log_fn("  ②パッキングオプション生成中 …")
     r2 = _req.post(f"{BASE}/inboundPlans/{plan_id}/packingOptions", headers=headers, json={}, timeout=15)
     if r2.status_code == 202:
         _fba_wait_op(BASE, headers, r2.json()["operationId"], log_fn)
@@ -951,77 +974,46 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
                        headers=headers, json={}, timeout=15)
         if r4.status_code == 202:
             _fba_wait_op(BASE, headers, r4.json()["operationId"], log_fn)
-        log_fn(f"  → パッキング確定: {opt_id}")
+        log_fn(f"  → パッキング確定")
 
-    # ③配置オプション生成 → 手数料最安を確定
-    log_fn("  配置オプション生成中 …")
+    # ③配置オプション生成 → 手数料最安を確定（fees は list 形式）
+    log_fn("  ③配置オプション生成中 …")
     r5 = _req.post(f"{BASE}/inboundPlans/{plan_id}/placementOptions", headers=headers, json={}, timeout=15)
     if r5.status_code == 202:
         _fba_wait_op(BASE, headers, r5.json()["operationId"], log_fn, timeout=120)
 
     r6 = _req.get(f"{BASE}/inboundPlans/{plan_id}/placementOptions", headers=headers, timeout=15)
     placements = r6.json().get("placementOptions", []) if r6.status_code == 200 else []
+    ship_ids = []
     if placements:
         best = min(
             placements,
-            key=lambda x: float(x.get("fees", {}).get("totalAmount", {}).get("value", 999999)),
+            key=lambda x: sum(f.get("value", {}).get("amount", 0) for f in x.get("fees", [])),
         )
         p_id = best["placementOptionId"]
+        ship_ids = best.get("shipmentIds", [])
+        fee_total = sum(f.get("value", {}).get("amount", 0) for f in best.get("fees", []))
         r7 = _req.post(f"{BASE}/inboundPlans/{plan_id}/placementOptions/{p_id}/confirmation",
                        headers=headers, json={}, timeout=15)
         if r7.status_code == 202:
             _fba_wait_op(BASE, headers, r7.json()["operationId"], log_fn)
-        log_fn(f"  → 配置確定: {p_id}")
+        log_fn(f"  → 配置確定  手数料: JPY {fee_total:,}")
 
-    # ④輸送方法生成 → SPD（小口発送）を自動選択
-    log_fn("  輸送方法生成中 …")
-    # 配置確定後にシップメント一覧を取得してシップメントIDを得る
-    r_plan = _req.get(f"{BASE}/inboundPlans/{plan_id}", headers=headers, timeout=15)
-    shipment_ids = []
-    if r_plan.status_code == 200:
-        shipment_ids = r_plan.json().get("shipmentIds", [])
-
-    for ship_id in shipment_ids:
-        r8 = _req.post(
-            f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions",
-            headers=headers,
-            json={"readyToShipWindow": {"start": _dt.now().strftime("%Y-%m-%dT00:00:00Z")}},
-            timeout=15,
-        )
-        if r8.status_code == 202:
-            _fba_wait_op(BASE, headers, r8.json()["operationId"], log_fn)
-
-        r9 = _req.get(
-            f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions",
-            headers=headers, timeout=15,
-        )
-        transport_opts = r9.json().get("transportationOptions", []) if r9.status_code == 200 else []
-
-        # SPD（Small Parcel Delivery）を優先、なければ先頭
-        spd = next(
-            (o for o in transport_opts if o.get("shippingMode", "").upper() in ("SPD", "SMALL_PARCEL")),
-            transport_opts[0] if transport_opts else None,
-        )
-        if spd:
-            t_id = spd["transportationOptionId"]
-            r10 = _req.post(
-                f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions/{t_id}/confirmation",
-                headers=headers, json={}, timeout=15,
-            )
-            if r10.status_code == 202:
-                _fba_wait_op(BASE, headers, r10.json()["operationId"], log_fn)
-
-            mode = spd.get("shippingMode", "?")
-            carrier = spd.get("carrier", {}).get("name", "?")
-            log_fn(f"  → 輸送確定: {mode} / {carrier}")
-
-    # ⑤発送先 FC 住所をログに出力
-    for ship_id in shipment_ids:
+    # ④発送先 FC 住所と出荷確認ID を表示
+    for ship_id in ship_ids:
         r_ship = _req.get(f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}", headers=headers, timeout=15)
         if r_ship.status_code == 200:
-            dest = r_ship.json().get("destination", {}).get("address", {})
+            sd = r_ship.json()
+            dest = sd.get("destination", {}).get("address", {})
+            confirm_id = sd.get("shipmentConfirmationId", "")
             if dest:
-                log_fn(f"  📦 発送先: {dest.get('name','')} / {dest.get('addressLine1','')} {dest.get('city','')} {dest.get('postalCode','')}")
+                log_fn(f"  📦 発送先FC: {dest.get('name','')}  {dest.get('addressLine1','')} {dest.get('city','')} {dest.get('postalCode','')}")
+            if confirm_id:
+                log_fn(f"  📋 出荷確認ID: {confirm_id}")
+
+    log_fn("  ✅ プラン作成完了！")
+    log_fn("  ➡️  Seller Central で輸送方法を選択して納品を完了してください（①②③は完了済み）。")
+    log_fn("      https://sellercentral.amazon.co.jp/fba/inbound/index.html")
 
     return plan_id
 
