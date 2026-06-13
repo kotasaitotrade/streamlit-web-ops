@@ -35,7 +35,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📦 Amazon出品管理")
-st.caption("ASIN自動取得 / 自動出品 / 価格調整 / FNSKUラベル生成 / FBA納品プラン作成")
+st.caption("ASIN自動取得 / 価格調整 / FNSKUラベル生成 / FBA納品プラン作成")
 
 # ============================================================
 # アカウント選択
@@ -44,8 +44,17 @@ ACCOUNTS = {
     "sato": "1Xb66vv997dWX9CIofuPNY23tuIQwoNFmm-hNBLbnBYo",
     "kudo": "1keLLdpDRu2l9AjHyM6qRe_W8FFH_Jtl-isb1XFp8MzA",
 }
+ACCOUNT_LABELS = {
+    "sato": "sato（佐藤さん）",
+    "kudo": "kudo（工藤さん）",
+}
 
-account = st.selectbox("アカウント", list(ACCOUNTS.keys()), key="account_select")
+account = st.selectbox(
+    "アカウント",
+    list(ACCOUNTS.keys()),
+    format_func=lambda k: ACCOUNT_LABELS.get(k, k),
+    key="account_select",
+)
 ss_id = ACCOUNTS[account]
 
 st.divider()
@@ -288,6 +297,12 @@ with tab5:
 
     # ── ② 輸送方法の選択・確定 ────────────────────────────────
     st.markdown("#### ② 輸送方法の選択・確定（自動）")
+    st.info(
+        "SP-API の `inbound_shipment_transport_write` スコープが必要です。\n"
+        "スコープ未取得の場合は 403 エラーが表示されます→管理者に申請を依頼してください。\n"
+        "スコープ取得済みであればこのセクションで輸送方法を選択・確定できます。",
+        icon="ℹ️",
+    )
 
     plan_result = st.session_state.get("fba_plan_result", {})
     plan_id_val = plan_result.get("plan_id", "")
@@ -323,6 +338,8 @@ with tab5:
     with c5:
         box_weight = st.number_input("重量 (kg/箱)", min_value=0.1, value=5.0, step=0.1, key="fba_box_weight")
 
+    if not _plan_id:
+        st.caption("💡 ① を実行するとプランIDが自動入力されます。または上の欄に手動で入力してください。")
     get_transport = st.button(
         "▶ 輸送オプションを取得",
         key="get_transport",
