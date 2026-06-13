@@ -548,12 +548,10 @@ def _draw_page(c, item: dict, today: str):
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.lib.utils import ImageReader
-    from PIL import Image as PILImage
     import os
 
     FONT = "NotoSansJP"
     if FONT not in pdfmetrics.getRegisteredFontNames():
-        # assets/fonts/ → Streamlit Cloud の /usr/share/fonts/... の順に探す
         candidates = [
             os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "NotoSansJP.ttf"),
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -567,85 +565,50 @@ def _draw_page(c, item: dict, today: str):
     W, H = A4
     margin = 18 * mm
 
-    # ヘッダー
-    c.setFillColorRGB(0.13, 0.20, 0.50)
-    c.rect(0, H - 32 * mm, W, 32 * mm, fill=1, stroke=0)
-    c.setFillColorRGB(1, 1, 1)
-    c.setFont(FONT, 14)
-    c.drawString(margin, H - 12 * mm, f"FNSKUラベル   {item['kanri_id']}")
-    c.setFont(FONT, 8.5)
-    c.drawString(margin,       H - 21 * mm, f"SKU:   {item['sku']}")
-    c.drawString(margin + 160, H - 21 * mm, f"ASIN:  {item['asin']}")
-    c.drawString(margin + 310, H - 21 * mm, f"FNSKU: {item['fnsku'] or '(未取得)'}")
-    c.drawString(margin,       H - 29 * mm,
-                 f"コンディション: {item['condition_jp']}   {item['price']:,}円   {today}")
+    # 管理ID・日付（小さめ）
+    c.setFont(FONT, 9)
+    c.setFillColorRGB(0.4, 0.4, 0.4)
+    c.drawString(margin, H - 14 * mm, f"{item['kanri_id']}  /  {today}")
 
     # 商品名
+    c.setFont(FONT, 12)
     c.setFillColorRGB(0, 0, 0)
-    c.setFont(FONT, 11)
-    name = item["item_name"][:58] + ("…" if len(item["item_name"]) > 58 else "")
-    c.drawString(margin, H - 42 * mm, name)
+    name = item["item_name"][:52] + ("…" if len(item["item_name"]) > 52 else "")
+    c.drawString(margin, H - 24 * mm, name)
+
+    # コンディション
+    c.setFont(FONT, 10)
+    c.setFillColorRGB(0.2, 0.2, 0.2)
+    c.drawString(margin, H - 33 * mm, f"コンディション: {item['condition_jp']}")
 
     c.setStrokeColorRGB(0.75, 0.75, 0.75)
     c.setLineWidth(0.5)
-    c.line(margin, H - 46 * mm, W - margin, H - 46 * mm)
+    c.line(margin, H - 37 * mm, W - margin, H - 37 * mm)
 
-    # バーコード
-    bc_top = H - 49 * mm
-    bc_w, bc_h = 90 * mm, 42 * mm
+    # バーコード（中央寄せ、大きめ）
+    bc_w, bc_h = 140 * mm, 60 * mm
+    bc_x = (W - bc_w) / 2
+    bc_y = H / 2 - bc_h / 2
     if item["fnsku"]:
         try:
             bc_img = ImageReader(_barcode_png(item["fnsku"]))
-            c.drawImage(bc_img, margin, bc_top - bc_h, width=bc_w, height=bc_h,
+            c.drawImage(bc_img, bc_x, bc_y, width=bc_w, height=bc_h,
                         preserveAspectRatio=True, anchor="c")
         except Exception:
             pass
-    c.setFont(FONT, 11)
-    c.setFillColorRGB(0, 0, 0)
-    c.drawCentredString(margin + bc_w / 2, bc_top - bc_h - 7 * mm,
-                        item["fnsku"] or "(FNSKU未取得)")
 
-    # 画像
-    ix = margin + bc_w + 8 * mm
-    iw = W - ix - margin
-    if item["images"]:
-        c.setFont(FONT, 8.5)
-        c.setFillColorRGB(0.35, 0.35, 0.35)
-        c.drawString(ix, bc_top + 3 * mm, f"商品画像（{len(item['images'])}枚）")
-        th_w = (iw - 4 * mm) / 2
-        th_h = 32 * mm
-        for idx, img_data in enumerate(item["images"][:6]):
-            col_i, row_i = idx % 2, idx // 2
-            x = ix + col_i * (th_w + 4 * mm)
-            y = bc_top - (row_i + 1) * (th_h + 3 * mm)
-            try:
-                pil = PILImage.open(img_data)
-                if pil.mode in ("RGBA", "P", "LA"):
-                    pil = pil.convert("RGB")
-                out = io.BytesIO()
-                pil.save(out, format="JPEG", quality=85)
-                out.seek(0)
-                c.drawImage(ImageReader(out), x, y, width=th_w, height=th_h,
-                            preserveAspectRatio=True, anchor="c")
-            except Exception:
-                c.setFillColorRGB(0.92, 0.92, 0.92)
-                c.rect(x, y, th_w, th_h, fill=1, stroke=0)
-    else:
-        c.setFont(FONT, 8.5)
-        c.setFillColorRGB(0.55, 0.55, 0.55)
-        c.drawString(ix, bc_top - 12 * mm, "画像フォルダなし")
-        c.setFont(FONT, 7.5)
-        c.drawString(ix, bc_top - 19 * mm,
-                     f'Drive → フォルダ名「{item["sku"]}」を作成して画像を追加')
+    # FNSKU テキスト（バーコード直下）
+    c.setFont(FONT, 13)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(W / 2, bc_y - 10 * mm, item["fnsku"] or "(FNSKU未取得)")
 
     # フッター
-    c.setFillColorRGB(0, 0, 0)
     c.setStrokeColorRGB(0.75, 0.75, 0.75)
     c.line(margin, 18 * mm, W - margin, 18 * mm)
-    c.setFont(FONT, 7.5)
+    c.setFont(FONT, 8)
     c.setFillColorRGB(0.4, 0.4, 0.4)
-    c.drawString(margin, 11 * mm, f"センリツ  |  {item['kanri_id']}  |  {item['sku']}")
-    c.drawRightString(W - margin, 11 * mm, today)
+    c.drawString(margin, 11 * mm, item["sku"])
+    c.drawRightString(W - margin, 11 * mm, item.get("asin", ""))
 
 
 def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, list[str]]:
@@ -706,22 +669,12 @@ def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, 
         else:
             ct = "used_good"
 
-        images = []
-        folder_id = _find_sku_folder(t["sku"])
-        if folder_id:
-            for f in _list_images(folder_id):
-                try:
-                    images.append(_download_image(f["id"]))
-                except Exception:
-                    pass
-
-        log(f"[{t['kanri_id']}] FNSKU={fnsku or '未取得'} 画像={len(images)}枚")
+        log(f"[{t['kanri_id']}] FNSKU={fnsku or '未取得'}")
         items_for_pdf.append({
             **t,
             "fnsku": fnsku, "item_name": item_name,
             "condition_type": ct,
             "condition_jp": _CONDITION_JP.get(ct, ct),
-            "images": images,
         })
         time.sleep(0.2)
 
@@ -1028,19 +981,6 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             log(f"  → [DRY] ASIN={t['asin']} | {t['price']}円 | {t['condition_type']}")
             fnsku = "X00000DRY"
 
-        # Drive 画像取得（PDF用）
-        images = []
-        try:
-            folder_id = _find_sku_folder(t["sku"])
-            if folder_id:
-                for f in _list_images(folder_id):
-                    try:
-                        images.append(_download_image(f["id"]))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
         ct = t["condition_type"]
         items_for_pdf.append({
             "kanri_id":     t["kanri_id"],
@@ -1051,9 +991,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             "item_name":    item_name,
             "condition_type": ct,
             "condition_jp": _CONDITION_JP.get(ct, ct),
-            "images":       images,
         })
-        log(f"  → 画像: {len(images)}枚")
         time.sleep(0.5)
 
     # ─── ② FNSKUラベル PDF 生成 ──────────────────────────────
