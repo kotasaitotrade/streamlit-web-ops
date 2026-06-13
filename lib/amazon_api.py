@@ -1181,8 +1181,11 @@ def get_fba_transportation_options(
         return {
             "options": [],
             "error": (
-                "403 Forbidden: inbound_shipment_transport_write スコープが付与されていません。\n"
-                "SP-API デベロッパーコンソールでスコープ申請が必要です。"
+                "403 Forbidden: 輸送方法の生成に必要な権限がありません。\n\n"
+                "【小口発送（ヤマト・佐川）の場合】このステップは不要です。"
+                "① のログに表示された「📦 発送先FC住所」へ直接発送してください。\n\n"
+                "【大口貨物（LTL）の場合】Seller Central から輸送方法を選択してください。\n"
+                "（権限申請: SP-API デベロッパーコンソールで inbound_shipment_transport_write スコープを申請）"
             ),
         }
 
