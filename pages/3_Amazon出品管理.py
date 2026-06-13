@@ -35,7 +35,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📦 Amazon出品管理")
-st.caption("ASIN自動取得 / 自動出品 / 価格調整 / FNSKUラベル生成")
+st.caption("ASIN自動取得 / 自動出品 / 価格調整 / FNSKUラベル生成 / FBA納品プラン作成")
 
 # ============================================================
 # アカウント選択
@@ -254,17 +254,17 @@ with tab4:
 with tab5:
     st.subheader("🚚 FBA納品")
     st.markdown("""
-ステータス **`2.写真撮影済み`** の商品を対象に、出品登録と FNSKUラベル PDF を生成します。
+ステータス **`2.写真撮影済み`** の商品を対象に、出品登録・FNSKUラベル PDF・FBA 納品プラン作成を自動実行します。
 
 | ステップ | 方法 |
 |---|---|
-| ① 出品登録 + FNSKUラベル PDF | このページで自動実行 |
-| ② FBA 納品プラン作成 | [Seller Central で手動](https://sellercentral.amazon.co.jp/fba/sendtoamazon) |
+| ① 出品登録 + FNSKUラベル PDF + 納品プラン作成 | **このページで自動実行** |
+| ② 輸送方法の選択・発送 | [Seller Central で手動](https://sellercentral.amazon.co.jp/fba/inbound/index.html) |
 | ③ 発送後 受取確認 | このページで確認 |
 """)
 
     st.divider()
-    st.markdown("#### ① 出品登録 + FNSKUラベル PDF 生成")
+    st.markdown("#### ① 出品登録 + FNSKUラベル PDF 生成 + 納品プラン作成")
 
     c1, c2 = st.columns([1, 4])
     with c1:
@@ -304,12 +304,14 @@ with tab5:
             _get_status_counts.clear()
 
     st.divider()
-    st.markdown("#### ② FBA 納品プラン作成（Seller Central で手動）")
+    st.markdown("#### ② 輸送方法の選択・発送（Seller Central で手動）")
     st.info(
-        "PDF を印刷して商品に貼付後、以下の手順で Seller Central から納品プランを作成してください。\n\n"
-        "1. [Seller Central → 在庫管理](https://sellercentral.amazon.co.jp/inventory) を開く\n"
-        "2. 対象商品にチェック → **「アクションを選択」→「FBA納品の作成」**\n"
-        "3. 画面の指示に従って送付先 FC を確定・発送"
+        "① の実行後、納品プランの作成（プラン作成〜配置確定）は自動完了します。\n"
+        "以下のステップのみ Seller Central で手動完了してください。\n\n"
+        "1. [Seller Central → FBA 納品管理](https://sellercentral.amazon.co.jp/fba/inbound/index.html) を開く\n"
+        "2. ① で作成されたプランを選択 → **輸送方法（小口発送 SPD など）を選択**\n"
+        "3. 画面の指示に従って発送伝票を出力・梱包・発送\n\n"
+        "💡 ログに表示された **出荷確認ID** と **発送先FC住所** をご確認ください。"
     )
 
     st.divider()
