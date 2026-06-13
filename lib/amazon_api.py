@@ -973,6 +973,56 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> str | None
             _fba_wait_op(BASE, headers, r7.json()["operationId"], log_fn)
         log_fn(f"  → 配置確定: {p_id}")
 
+    # ④輸送方法生成 → SPD（小口発送）を自動選択
+    log_fn("  輸送方法生成中 …")
+    # 配置確定後にシップメント一覧を取得してシップメントIDを得る
+    r_plan = _req.get(f"{BASE}/inboundPlans/{plan_id}", headers=headers, timeout=15)
+    shipment_ids = []
+    if r_plan.status_code == 200:
+        shipment_ids = r_plan.json().get("shipmentIds", [])
+
+    for ship_id in shipment_ids:
+        r8 = _req.post(
+            f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions",
+            headers=headers,
+            json={"readyToShipWindow": {"start": _dt.now().strftime("%Y-%m-%dT00:00:00Z")}},
+            timeout=15,
+        )
+        if r8.status_code == 202:
+            _fba_wait_op(BASE, headers, r8.json()["operationId"], log_fn)
+
+        r9 = _req.get(
+            f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions",
+            headers=headers, timeout=15,
+        )
+        transport_opts = r9.json().get("transportationOptions", []) if r9.status_code == 200 else []
+
+        # SPD（Small Parcel Delivery）を優先、なければ先頭
+        spd = next(
+            (o for o in transport_opts if o.get("shippingMode", "").upper() in ("SPD", "SMALL_PARCEL")),
+            transport_opts[0] if transport_opts else None,
+        )
+        if spd:
+            t_id = spd["transportationOptionId"]
+            r10 = _req.post(
+                f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}/transportationOptions/{t_id}/confirmation",
+                headers=headers, json={}, timeout=15,
+            )
+            if r10.status_code == 202:
+                _fba_wait_op(BASE, headers, r10.json()["operationId"], log_fn)
+
+            mode = spd.get("shippingMode", "?")
+            carrier = spd.get("carrier", {}).get("name", "?")
+            log_fn(f"  → 輸送確定: {mode} / {carrier}")
+
+    # ⑤発送先 FC 住所をログに出力
+    for ship_id in shipment_ids:
+        r_ship = _req.get(f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}", headers=headers, timeout=15)
+        if r_ship.status_code == 200:
+            dest = r_ship.json().get("destination", {}).get("address", {})
+            if dest:
+                log_fn(f"  📦 発送先: {dest.get('name','')} / {dest.get('addressLine1','')} {dest.get('city','')} {dest.get('postalCode','')}")
+
     return plan_id
 
 
