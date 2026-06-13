@@ -929,6 +929,7 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> dict | Non
         log_fn(f"  → 配置確定  手数料: JPY {fee_total:,}")
 
     # ④発送先 FC 住所と出荷確認ID を表示
+    confirmation_ids: dict[str, str] = {}  # sh... → FBA15... の対応表
     for ship_id in ship_ids:
         r_ship = _req.get(f"{BASE}/inboundPlans/{plan_id}/shipments/{ship_id}", headers=headers, timeout=15)
         if r_ship.status_code == 200:
@@ -939,10 +940,11 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> dict | Non
                 log_fn(f"  📦 発送先FC: {dest.get('name','')}  {dest.get('addressLine1','')} {dest.get('city','')} {dest.get('postalCode','')}")
             if confirm_id:
                 log_fn(f"  📋 出荷確認ID: {confirm_id}")
+                confirmation_ids[ship_id] = confirm_id
 
     log_fn("  ✅ プラン作成完了！（配置確定まで完了）")
 
-    return {"plan_id": plan_id, "placement_option_id": p_id, "shipment_ids": ship_ids}
+    return {"plan_id": plan_id, "placement_option_id": p_id, "shipment_ids": ship_ids, "confirmation_ids": confirmation_ids}
 
 
 def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None):
@@ -1073,6 +1075,12 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         plan_id = plan_result_obj["plan_id"] if plan_result_obj else None
 
         # ステータス更新（FBA プラン成否に関わらず FNSKU 取得済みは発送待ちへ）
+        # V列: FBA出荷確認ID（FBA15...形式）→ 受取確認で使用
+        fba_id = ""
+        if plan_result_obj:
+            conf_ids = plan_result_obj.get("confirmation_ids", {})
+            fba_id = next(iter(conf_ids.values()), "")
+
         updated = 0
         for it in items_for_pdf:
             if not it.get("fnsku") or it["fnsku"] == "X00000DRY":
@@ -1081,7 +1089,9 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             matched = [t for t in targets if t["sku"] == sku]
             for t in matched:
                 _update_cell(t["sheet_row"], "D", "3.発送待ち", spreadsheet_id)
-                log(f"  [{t['kanri_id']}] → 3.発送待ち")
+                if fba_id:
+                    _update_cell(t["sheet_row"], "V", fba_id, spreadsheet_id)
+                log(f"  [{t['kanri_id']}] → 3.発送待ち" + (f"  FBA ID: {fba_id}" if fba_id else ""))
                 updated += 1
         log(f"  → {updated} 件更新完了")
 

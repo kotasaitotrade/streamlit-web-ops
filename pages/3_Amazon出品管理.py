@@ -364,10 +364,23 @@ with tab5:
             if result["error"]:
                 st.error(f"エラー: {result['error']}")
             elif not result["options"]:
-                st.warning("輸送オプションが見つかりませんでした。")
+                st.warning(
+                    "輸送オプションが見つかりませんでした。\n\n"
+                    "**小口発送（ヤマト・佐川）の場合**: このステップは不要です。"
+                    "① のログに表示された発送先FC住所へ直接発送してください。"
+                )
             else:
+                all_have_precond = all(o.get("preconditions") for o in result["options"])
                 st.session_state["fba_transport_options"] = result["options"]
-                st.success(f"✅ {len(result['options'])} 件の輸送オプションを取得しました")
+                if all_have_precond:
+                    st.warning(
+                        f"⚠️ {len(result['options'])} 件取得しましたが、すべてに事前設定（配送枠確認など）が必要です。\n\n"
+                        "**小口発送（ヤマト・佐川）の場合**: このステップをスキップして、"
+                        "① のログの発送先FC住所へ直接発送してください。\n\n"
+                        "**大口貨物（LTL）の場合**: Seller Central から輸送方法を選択してください。"
+                    )
+                else:
+                    st.success(f"✅ {len(result['options'])} 件の輸送オプションを取得しました")
 
     # オプション選択 → 確定
     transport_options = st.session_state.get("fba_transport_options", [])
@@ -414,7 +427,11 @@ with tab5:
         # 選択したオプションの preconditions 表示
         sel_pre = selected_opt.get("preconditions", [])
         if sel_pre:
-            st.info(f"このオプションには事前設定が必要です: {', '.join(sel_pre)}")
+            st.warning(
+                f"⚠️ このオプションは事前設定が必要なため確定できません: **{', '.join(sel_pre)}**\n\n"
+                "小口発送（ヤマト・佐川）の場合は ① のログの発送先FC住所へ直接発送してください。\n"
+                "大口貨物の場合は Seller Central から輸送方法を選択してください。"
+            )
 
         confirm_transport = st.button("▶ 輸送方法を確定する", key="confirm_transport", type="primary",
                                       disabled=bool(sel_pre))
