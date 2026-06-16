@@ -116,11 +116,12 @@ def _stream_logs(gen, placeholder):
 # ============================================================
 # タブ
 # ============================================================
-tab1, tab3, tab4, tab5 = st.tabs([
+tab1, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 ASIN取得",
     "💴 価格調整",
     "🏷️ FNSKUラベル",
     "🚚 FBA納品",
+    "📊 商品サマリー",
 ])
 
 
@@ -151,21 +152,23 @@ Amazon カタログを検索して ASIN を自動書き込みします。
 with tab3:
     st.subheader("💴 価格自動調整")
     st.markdown("""
-ステータスが **`3.出品済み`** の全商品の BuyBox 価格を取得し、自動調整します。
+ステータスが **`3.出品済み`** の全商品について、**同コンディション・FBA出品者の最安値** を取得し自動調整します。
 
-| 状況 | 対応 |
+| 項目 | 内容 |
 |---|---|
-| BuyBox より高い | BuyBox - 1円（アンダーカット） |
-| BuyBox より 20% 以上安い | 現在価格を引き上げ（上限: 元値） |
-| 上記以外 | 変更なし |
-
-下限: **仕入れ値 × 1.15**（15% マージン確保）
+| 対象 | `3.出品済み` の全商品 |
+| 参照価格 | 同コンディション（良い/非常に良い/可）のFBA最安値 |
+| 目標価格 | 参照価格 − 引き下げ幅（円）|
+| 下限 | スプレッドシートW列の最低価格（0=無制限）|
+| API呼び出し | 同一ASINはキャッシュで1回のみ |
 """)
 
-    c1, c2 = st.columns([1, 4])
+    c1, c2, c3 = st.columns([1, 1, 3])
     with c1:
         dry3 = st.checkbox("ドライラン", value=True, key="dry3")
-    run_reprice = c2.button(
+    with c2:
+        step_yen = st.number_input("引き下げ幅（円）", min_value=1, max_value=1000, value=10, step=1, key="step_yen")
+    run_reprice = c3.button(
         "▶ ドライラン実行" if dry3 else "▶ 本番実行",
         key="run_reprice",
         type="secondary" if dry3 else "primary",
@@ -176,8 +179,11 @@ with tab3:
     if run_reprice:
         log_area = st.empty()
         label = "ドライラン" if dry3 else "本番"
-        with st.spinner(f"価格調整中 [{label}]... (1件あたり約2秒)"):
-            lines = _stream_logs(amazon.run_auto_reprice(dry_run=dry3, spreadsheet_id=ss_id), log_area)
+        with st.spinner(f"価格調整中 [{label}]... (1件あたり約1秒)"):
+            lines = _stream_logs(
+                amazon.run_auto_reprice(dry_run=dry3, step_yen=int(step_yen), spreadsheet_id=ss_id),
+                log_area,
+            )
         st.success("✅ 完了しました")
         if not dry3:
             _get_status_counts.clear()
@@ -467,3 +473,55 @@ with tab5:
             lines_r = _stream_logs(amazon.run_receipt_check(spreadsheet_id=ss_id), log_area_r)
         st.success("✅ 完了しました")
         _get_status_counts.clear()
+
+
+# ── タブ6: 商品サマリー ──────────────────────────────────────
+with tab6:
+    st.subheader("📊 商品サマリー出力")
+    st.markdown("""
+**佐藤さん・工藤さん両アカウント**の全商品を1つのスプレッドシートにまとめます。
+
+| 項目 | 内容 |
+|---|---|
+| 商品名 | Amazon カタログから自動取得 |
+| 写真 | Google Drive の1枚目の画像 |
+| 出品中 | ステータスが `3.出品済み` なら ○ |
+| その他 | 販売価格・カート価格予想・ライバル数・最低価格・仕入れ値など |
+""")
+
+    out_ss_id = st.text_input(
+        "既存スプレッドシートID（空欄=新規作成）",
+        placeholder="例: 1ABCxxx...  ← 2回目以降は前回作成したIDを入れると上書き更新",
+        key="summary_ss_id",
+    )
+
+    run_summary = st.button(
+        "▶ スプレッドシートを作成/更新",
+        key="run_summary",
+        type="primary",
+    )
+    st.caption("⏱ 商品名を Amazon API で取得するため、件数に応じて数分かかります。")
+
+    if run_summary:
+        log_area6 = st.empty()
+        result_url = None
+        lines6 = []
+        try:
+            with st.spinner("サマリー作成中..."):
+                for msg in amazon.run_create_summary_sheet(out_ss_id.strip() or None):
+                    lines6.append(msg)
+                    log_area6.markdown(
+                        '<div class="log-box">' + "\n".join(lines6[-80:]) + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if msg.startswith("URL: "):
+                        result_url = msg[5:]
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました: {e}")
+            import traceback
+            st.code(traceback.format_exc(), language="python")
+        if result_url:
+            st.success("✅ 完了しました")
+            st.markdown(f"**[📊 スプレッドシートを開く]({result_url})**")
+            st.code(result_url.split("/d/")[1].split("/")[0], language=None)
+            st.caption("↑ このIDを「既存スプレッドシートID」欄に入れると次回から上書き更新になります")

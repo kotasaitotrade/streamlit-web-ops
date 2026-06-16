@@ -1525,7 +1525,9 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             yield f"スプレッドシート({account_name})読み込みエラー: {e}"
 
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
-    yield f"⑤ 価格・写真を取得中..."
+    yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
+    if not amazon_skus:
+        yield "⚠️ Amazon APIから商品が0件でした。認証エラーか在庫・注文が存在しない可能性があります。"
     products_api = Products(credentials=creds, marketplace=Marketplaces.JP)
     offers_cache: dict[str, dict | None] = {}
     folder_cache: dict[str, str | None] = {}
@@ -1622,53 +1624,67 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
     yield f"合計 {len(all_rows)} 件集計完了"
 
-    # ── Step 5: スプレッドシート書き込み ────────────────────────────────
-    if out_spreadsheet_id:
-        ss_id  = out_spreadsheet_id
-        ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
-        yield "既存スプレッドシートをクリアして上書きします..."
-        svc.spreadsheets().values().clear(
-            spreadsheetId=ss_id, range="商品一覧!A1:T5000",
+    # ── Step 6: スプレッドシート書き込み ────────────────────────────────
+    try:
+        if out_spreadsheet_id:
+            ss_id  = out_spreadsheet_id
+            ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
+            yield "既存スプレッドシートをクリアして上書きします..."
+            # シートが存在しない場合は先に作成する
+            try:
+                svc.spreadsheets().values().clear(
+                    spreadsheetId=ss_id, range="商品一覧!A1:T5000",
+                ).execute()
+            except Exception:
+                yield "  → 「商品一覧」シートが未作成のため新規追加します..."
+                svc.spreadsheets().batchUpdate(
+                    spreadsheetId=ss_id,
+                    body={"requests": [{"addSheet": {"properties": {"title": "商品一覧"}}}]},
+                ).execute()
+        else:
+            yield "新規スプレッドシートを作成中..."
+            ss = svc.spreadsheets().create(body={
+                "properties": {"title": "Amazon商品サマリー"},
+                "sheets": [{"properties": {"title": "商品一覧"}}],
+            }).execute()
+            ss_id  = ss["spreadsheetId"]
+            ss_url = ss["spreadsheetUrl"]
+            yield f"作成完了: {ss_url}"
+
+        yield f"データ書き込み中... ({len(all_rows)} 件)"
+        svc.spreadsheets().values().update(
+            spreadsheetId=ss_id, range="商品一覧!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [_SUMMARY_HEADERS] + all_rows},
         ).execute()
-    else:
-        yield "新規スプレッドシートを作成中..."
-        ss = svc.spreadsheets().create(body={
-            "properties": {"title": "Amazon商品サマリー"},
-            "sheets": [{"properties": {"title": "商品一覧"}}],
-        }).execute()
-        ss_id  = ss["spreadsheetId"]
-        ss_url = ss["spreadsheetUrl"]
-        yield f"作成完了: {ss_url}"
+        yield "  → 書き込み完了"
 
-    yield "データ書き込み中..."
-    svc.spreadsheets().values().update(
-        spreadsheetId=ss_id, range="商品一覧!A1",
-        valueInputOption="USER_ENTERED",
-        body={"values": [_SUMMARY_HEADERS] + all_rows},
-    ).execute()
+        # 書式: 1行固定・行高120px・写真列160px
+        sheet_id = svc.spreadsheets().get(spreadsheetId=ss_id).execute()["sheets"][0]["properties"]["sheetId"]
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=ss_id,
+            body={"requests": [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sheet_id,
+                                   "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount",
+                }},
+                {"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                              "startIndex": 1, "endIndex": max(len(all_rows), 1) + 1},
+                    "properties": {"pixelSize": 120}, "fields": "pixelSize",
+                }},
+                {"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                              "startIndex": 3, "endIndex": 4},  # 写真列
+                    "properties": {"pixelSize": 160}, "fields": "pixelSize",
+                }},
+            ]},
+        ).execute()
 
-    # 書式: 1行固定・行高120px・写真列160px
-    sheet_id = svc.spreadsheets().get(spreadsheetId=ss_id).execute()["sheets"][0]["properties"]["sheetId"]
-    svc.spreadsheets().batchUpdate(
-        spreadsheetId=ss_id,
-        body={"requests": [
-            {"updateSheetProperties": {
-                "properties": {"sheetId": sheet_id,
-                               "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
-            }},
-            {"updateDimensionProperties": {
-                "range": {"sheetId": sheet_id, "dimension": "ROWS",
-                          "startIndex": 1, "endIndex": len(all_rows) + 1},
-                "properties": {"pixelSize": 120}, "fields": "pixelSize",
-            }},
-            {"updateDimensionProperties": {
-                "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                          "startIndex": 3, "endIndex": 4},  # 写真列
-                "properties": {"pixelSize": 160}, "fields": "pixelSize",
-            }},
-        ]},
-    ).execute()
-
-    yield f"完了！ {len(all_rows)} 件を書き込みました"
-    yield f"URL: {ss_url}"
+        yield f"完了！ {len(all_rows)} 件を書き込みました"
+        yield f"URL: {ss_url}"
+    except Exception as e:
+        import traceback
+        yield f"❌ 書き込みエラー: {e}"
+        yield traceback.format_exc()
