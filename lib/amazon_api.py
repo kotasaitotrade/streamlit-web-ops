@@ -147,6 +147,9 @@ COL_STATE       = 17
 COL_NOTE_VG     = 18
 COL_NOTE_G      = 19
 COL_SHIPMENT_ID = 21   # V: FBA Shipment ID (U列は「型番など」で使用中のため)
+COL_CART_PRICE  = 28   # AC: カートに入る価格予想（自動書き込み）
+COL_RIVAL_COUNT = 29   # AD: 同条件FBAライバル数（自動書き込み）
+COL_MIN_PRICE   = 30   # AE: 最低販売価格（空=現在価格を下限として扱う）
 
 CONDITION_FBA_MAP = {
     "used_very_good":  "UsedVeryGood",
@@ -315,110 +318,189 @@ _CONDITION_MAP = {
 # 価格自動調整
 # ============================================================
 
-MIN_MARGIN_RATE    = 1.15
-PRICE_UP_THRESHOLD = 1.20
+# 商品コンディション → SP-API SubCondition 値のマッピング
+_SUBCONDITION_MAP = {
+    "used_very_good":  "very_good",
+    "used_good":       "good",
+    "used_acceptable": "acceptable",
+    "new":             "new",
+}
 
 
-def _buybox(products_api, asin: str):
+def _get_item_offers(products_api, asin: str) -> dict | None:
+    """get_item_offers で ASIN の中古出品一覧を取得。失敗時は None。"""
     try:
-        resp = products_api.get_competitive_pricing_for_asins([asin])
-        for prod in (resp.payload or []):
-            for cp in prod.get("Product", {}).get("CompetitivePricing", {}).get("CompetitivePrices", []):
-                if cp.get("CompetitivePriceId") == "1":
-                    amt = cp.get("Price", {}).get("LandedPrice", {}).get("Amount")
-                    if amt is not None:
-                        return int(float(amt))
+        resp = products_api.get_item_offers(asin=asin, item_condition="Used")
+        return resp.payload
     except Exception:
-        pass
-    return None
+        return None
 
 
-def run_auto_reprice(dry_run: bool = True, spreadsheet_id=None):
-    """generator: 価格調整ログを yield する。"""
+def _analyze_fba_offers(payload: dict | None, sub_condition: str) -> tuple[int | None, int]:
+    """同じ SubCondition かつ FBA(Prime) 出品者を分析して (最安値, FBA数) を返す。
+    FBA 出品者がいない場合は BuyBox 価格を最安値として返し、FBA数は 0。"""
+    if not payload:
+        return None, 0
+    min_price = None
+    count = 0
+    for offer in payload.get("Offers", []):
+        if offer.get("SubCondition", "").lower() != sub_condition.lower():
+            continue
+        if not offer.get("PrimeInformation", {}).get("IsPrime"):
+            continue
+        count += 1
+        try:
+            price = int(float(offer["ListingPrice"]["Amount"]))
+        except Exception:
+            continue
+        if min_price is None or price < min_price:
+            min_price = price
+    if min_price is not None:
+        return min_price, count
+    # FBA競合なし → BuyBox価格にフォールバック（countは0のまま）
+    for bb in payload.get("Summary", {}).get("BuyBoxPrices", []):
+        try:
+            price = int(float(bb["LandedPrice"]["Amount"]))
+            if min_price is None or price < min_price:
+                min_price = price
+        except Exception:
+            pass
+    return min_price, 0
+
+
+def _batch_write_reprice(sheet_row: int, cart_price: int | None, rival_count: int,
+                         new_price: int | None, spreadsheet_id=None):
+    """X列(カート価格予想)・Y列(ライバル数) を常に書き込む。
+    new_price が指定された場合は J列(販売価格)も更新する。"""
+    svc = _sheets_service()
+    ssid = _ssid(spreadsheet_id)
+    data = [
+        {"range": f"{SHEET_NAME}!AC{sheet_row}",
+         "values": [[str(cart_price) if cart_price is not None else ""]]},
+        {"range": f"{SHEET_NAME}!AD{sheet_row}",
+         "values": [[str(rival_count)]]},
+    ]
+    if new_price is not None:
+        data.append({"range": f"{SHEET_NAME}!J{sheet_row}", "values": [[str(new_price)]]})
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=ssid,
+        body={"valueInputOption": "RAW", "data": data},
+    ).execute()
+
+
+def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=None):
+    """generator: ASIN+コンディション別に同条件FBA最安値を参照して価格調整ログを yield する。
+
+    ロジック:
+      target = 同条件FBA最安値 - step_yen
+      W列(最低価格)が設定されていれば下限として使用。空の場合は現在価格が下限（デフォルト）。
+      X列にカートに入る価格予想、Y列にFBAライバル数を常に書き込む。
+    """
     from sp_api.api import ListingsItems, Products
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("P", spreadsheet_id)
+    all_rows = _read_rows("AE", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:
         if _cell(row, COL_STATUS) != "3.出品済み":
             continue
-        asin  = _cell(row, COL_ASIN)
-        sku   = _cell(row, COL_SKU)
-        price_str  = _cell(row, COL_HANBAI)
-        shiire_str = _cell(row, COL_SHIIRE)
+        asin      = _cell(row, COL_ASIN)
+        sku       = _cell(row, COL_SKU)
+        price_str = _cell(row, COL_HANBAI)
+        state     = _cell(row, COL_STATE)
+        min_str   = _cell(row, COL_MIN_PRICE)
         if not asin or not sku or not price_str:
             continue
         try:
             current = int(float(price_str.replace(",", "").replace("¥", "")))
-            shiire  = int(float(shiire_str.replace(",", ""))) if shiire_str else 0
         except ValueError:
             continue
+        # W列が空 → 現在価格を下限（デフォルト = 価格を下げない）
+        try:
+            floor = int(float(min_str.replace(",", ""))) if min_str else current
+        except ValueError:
+            floor = current
+        ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
         targets.append({
-            "sheet_row": sheet_row,
-            "kanri_id": _cell(row, COL_KANRI_ID),
-            "asin": asin, "sku": sku,
-            "current": current,
-            "floor":   math.ceil(shiire * MIN_MARGIN_RATE) if shiire else 1,
-            "ceiling": current,
+            "sheet_row":     sheet_row,
+            "kanri_id":      _cell(row, COL_KANRI_ID),
+            "asin":          asin,
+            "sku":           sku,
+            "current":       current,
+            "floor":         floor,
+            "floor_manual":  bool(min_str),
+            "sub_condition": sub_cond,
         })
 
-    yield f"調整対象: {len(targets)} 件"
+    yield f"調整対象: {len(targets)} 件（3.出品済み）"
     if not targets:
         yield "対象なし。終了します。"
         return
 
     products_api = Products(credentials=_sp_creds(), marketplace=Marketplaces.JP)
     listings_api = None if dry_run else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+
+    # 同一ASIN は1回だけ API 呼び出し（キャッシュ）
+    offers_cache: dict[str, dict | None] = {}
     updated = skipped = failed = 0
 
     for t in targets:
-        yield f"[{t['kanri_id']}] 現在={t['current']}円 | 下限={t['floor']}円"
-        bb = _buybox(products_api, t["asin"])
-        time.sleep(2)
+        floor_label = f"{t['floor']:,}円(手動)" if t["floor_manual"] else f"{t['floor']:,}円(現在価格)"
+        yield f"[{t['kanri_id']}] 現在={t['current']:,}円 | {t['sub_condition']} | 下限={floor_label}"
 
-        if bb is None:
-            yield f"  → BuyBox取得不可: スキップ"
+        asin = t["asin"]
+        if asin not in offers_cache:
+            offers_cache[asin] = _get_item_offers(products_api, asin)
+            time.sleep(1)
+
+        min_competitor, rival_count = _analyze_fba_offers(offers_cache[asin], t["sub_condition"])
+
+        if min_competitor is None:
+            yield f"  → 同条件の競合出品なし: スキップ（ライバル={rival_count}）"
+            _batch_write_reprice(t["sheet_row"], None, rival_count, None, spreadsheet_id)
             skipped += 1
             continue
 
-        if bb < t["current"]:
-            new_price = max(bb - 1, t["floor"])
-            reason = f"アンダーカット (BuyBox={bb}円)"
-        elif bb > t["current"] * PRICE_UP_THRESHOLD:
-            new_price = max(min(bb - 1, t["ceiling"]), t["floor"])
-            reason = f"値上げ (BuyBox={bb}円)"
-        else:
-            yield f"  → 変更不要 (BuyBox={bb}円)"
+        target = min_competitor - step_yen
+        direction = "↓" if target < t["current"] else "↑" if target > t["current"] else "→"
+        yield f"  → 競合最安値={min_competitor:,}円 / ライバル={rival_count} / 目標={target:,}円 {direction}"
+
+        if target < t["floor"]:
+            yield f"  → 下限({t['floor']:,}円)を下回るためスキップ"
+            _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
             skipped += 1
             continue
 
-        if new_price == t["current"]:
-            yield f"  → 変更なし (下限={t['floor']}円 により調整済み)"
+        if target == t["current"]:
+            yield f"  → 変更不要（すでに目標価格）"
+            _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
             skipped += 1
             continue
 
-        yield f"  → 新価格: {new_price}円 ({reason})"
         if dry_run:
+            yield f"  → [ドライラン] {t['current']:,}円 → {target:,}円"
+            _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
             updated += 1
             continue
 
         try:
-            listings_api.put_listings_item(
+            listings_api.patch_listings_item(
                 sellerId=_seller_id(), sku=t["sku"],
                 marketplaceIds=[_marketplace_id()],
                 body={
                     "productType": "PRODUCT",
                     "patches": [{"op": "replace", "path": "/attributes/purchasable_offer",
-                                 "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(new_price)}]}]}]}],
+                                 "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(target)}]}]}]}],
                 },
             )
-            _update_cell(t["sheet_row"], "J", str(new_price), spreadsheet_id)
-            yield f"  → Amazon + シート更新完了"
+            _batch_write_reprice(t["sheet_row"], target, rival_count, target, spreadsheet_id)
+            yield f"  → 更新完了: {t['current']:,}円 → {target:,}円"
             updated += 1
         except Exception as e:
+            _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
             yield f"  → エラー: {e}"
             failed += 1
         time.sleep(1)
@@ -928,6 +1010,12 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             price = int(float(price_str.replace(",", "").replace("¥", "")))
         except ValueError:
             continue
+        # Drive に画像がない SKU はスキップ
+        folder_id = _find_sku_folder(sku)
+        if not folder_id or not _list_images(folder_id, max_count=1):
+            kanri_id = _cell(row, COL_KANRI_ID)
+            log(f"  [{kanri_id}] {sku} → Drive に画像なし。スキップ")
+            continue
         ct, note_col = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
         targets.append({
             "sheet_row":     sheet_row,
@@ -941,7 +1029,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             "state_raw":     state,
         })
 
-    log(f"対象: {len(targets)} 件（2.写真撮影済み）")
+    log(f"対象: {len(targets)} 件（2.写真撮影済み かつ Drive に画像あり）")
     if not targets:
         log("対象なし。終了します。")
         return logs, b"", []
@@ -1275,3 +1363,312 @@ def run_receipt_check(spreadsheet_id=None):
             yield f"  → エラー: {e}"
 
     yield f"完了: {updated} 件を 3.出品済み に更新しました"
+
+
+# ============================================================
+# 商品サマリースプレッドシート作成 / 更新
+# ============================================================
+
+_SUMMARY_ACCOUNTS = {
+    "sato": "1Xb66vv997dWX9CIofuPNY23tuIQwoNFmm-hNBLbnBYo",
+    "kudo": "1keLLdpDRu2l9AjHyM6qRe_W8FFH_Jtl-isb1XFp8MzA",
+}
+
+_SUMMARY_HEADERS = [
+    "SKU", "ステータス", "商品名", "写真", "商品ページ",
+    "販売価格", "カート価格予想", "FBAライバル数", "最低販売価格", "コンディション",
+    "ASIN", "アカウント",
+    "FBA納品日", "出品日", "売却日",
+    "仕入れ値", "仕入れ日",
+]
+
+
+def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
+    """generator: Amazon APIのみをベースにしたサマリーシートを作成/更新する。
+
+    データソース（Amazon API が主役）:
+      - FBA Inventory API   → 販売中（在庫あり）
+      - FBA Inbound API     → 納品中（Amazon倉庫に向かっている / 受け取り中）
+      - Orders API (1年)    → 売却済み
+      スプレッドシートは仕入れ値・写真など補足データのみに使用。
+      スプレッドシートにしかない商品は表示しない。
+    """
+    import datetime as dt
+    from sp_api.api import Inventories, Orders as OrdersAPI, Products, FulfillmentInboundV0
+    from sp_api.base import Marketplaces
+
+    svc = _sheets_service()
+    creds = _sp_creds()
+
+    # ── Step 1: FBA Inventory（販売中） ─────────────────────────────────
+    yield "① Amazon FBA在庫を取得中..."
+    inv_api = Inventories(credentials=creds, marketplace=Marketplaces.JP)
+    fba_items: dict[str, dict] = {}  # sku -> {asin, product_name, condition, last_updated, total_qty}
+    try:
+        resp = inv_api.get_inventory_summary_marketplace(marketplaceId=_marketplace_id())
+        for item in resp.payload.get("inventorySummaries", []):
+            sku = item.get("sellerSku", "")
+            if not sku:
+                continue
+            fba_items[sku] = {
+                "asin":         item.get("asin", ""),
+                "product_name": item.get("productName", ""),
+                "condition":    item.get("condition", ""),
+                "last_updated": (item.get("lastUpdatedTime") or "")[:10],
+                "total_qty":    item.get("totalQuantity", 0),
+            }
+    except Exception as e:
+        yield f"FBA在庫取得エラー: {e}"
+    yield f"  → {len(fba_items)} SKU"
+
+    # ── Step 2: FBA Inbound（納品中） ────────────────────────────────────
+    yield "② FBA納品中シップメントを取得中..."
+    inbound_api = FulfillmentInboundV0(credentials=creds, marketplace=Marketplaces.JP)
+    inbound_skus: dict[str, dict] = {}  # sku -> {asin, product_name, shipment_id, created_date}
+    active_statuses = ["WORKING", "SHIPPED", "IN_TRANSIT", "RECEIVING", "CHECKED_IN"]
+    try:
+        resp = inbound_api.get_shipments(
+            QueryType="SHIPMENT",
+            ShipmentStatusList=active_statuses,
+            MarketplaceId=_marketplace_id(),
+        )
+        for shipment in resp.payload.get("ShipmentData", []):
+            shipment_id = shipment.get("ShipmentId", "")
+            shipment_status = shipment.get("ShipmentStatus", "")
+            try:
+                items_resp = inbound_api.shipment_items(
+                    ShipmentId=shipment_id,
+                    MarketplaceId=_marketplace_id(),
+                )
+                for it in items_resp.payload.get("ItemData", []):
+                    sku = it.get("SellerSKU", "")
+                    if sku and sku not in inbound_skus:
+                        inbound_skus[sku] = {
+                            "asin":            it.get("FulfillmentNetworkSKU", ""),
+                            "product_name":    "",
+                            "shipment_id":     shipment_id,
+                            "shipment_status": shipment_status,
+                        }
+                time.sleep(0.3)
+            except Exception:
+                pass
+    except Exception as e:
+        yield f"FBA Inbound取得エラー: {e}"
+    # FBA在庫にある = 受け取り済みなのでinboundから除外
+    for sku in list(inbound_skus.keys()):
+        if sku in fba_items:
+            del inbound_skus[sku]
+    yield f"  → {len(inbound_skus)} SKU（納品中）"
+
+    # ── Step 3: 注文履歴（売却済み） ────────────────────────────────────
+    yield "③ 注文履歴を取得中（過去1年）..."
+    orders_api = OrdersAPI(credentials=creds, marketplace=Marketplaces.JP)
+    created_after = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sold_skus: dict[str, dict] = {}
+    try:
+        resp = orders_api.get_orders(
+            CreatedAfter=created_after,
+            MarketplaceIds=[_marketplace_id()],
+            FulfillmentChannels=["AFN"],
+        )
+        order_list = list(resp.payload.get("Orders", []))
+        nt = resp.payload.get("NextToken")
+        while nt:
+            resp = orders_api.get_orders(NextToken=nt)
+            order_list.extend(resp.payload.get("Orders", []))
+            nt = resp.payload.get("NextToken")
+            time.sleep(0.3)
+        yield f"  注文 {len(order_list)} 件。SKU照合中..."
+        for order in order_list:
+            if order.get("OrderStatus") == "Canceled":
+                continue
+            order_id      = order.get("AmazonOrderId", "")
+            purchase_date = order.get("PurchaseDate", "")[:10]
+            try:
+                ir = orders_api.get_order_items(order_id)
+                for oi in ir.payload.get("OrderItems", []):
+                    sku = oi.get("SellerSKU", "")
+                    if sku and sku not in sold_skus:
+                        sold_skus[sku] = {"purchase_date": purchase_date}
+                time.sleep(0.3)
+            except Exception:
+                pass
+    except Exception as e:
+        yield f"注文取得エラー: {e}"
+    yield f"  → {len(sold_skus)} SKU（売却済み）"
+
+    # ── Step 4: Amazonベースで全SKUを確定（スプレッドシートは補足のみ） ──
+    # Amazon側にある商品だけが対象。スプレッドシートだけの商品は除外。
+    amazon_skus = set(fba_items) | set(inbound_skus) | set(sold_skus)
+    yield f"④ Amazon商品数: {len(amazon_skus)} SKU。スプレッドシートで補足中..."
+
+    sku_master: dict[str, dict] = {}
+    for account_name, ssid in _SUMMARY_ACCOUNTS.items():
+        try:
+            result = svc.spreadsheets().values().get(
+                spreadsheetId=ssid, range="商品管理!A2:AE4000",
+            ).execute()
+            for row in result.get("values", []):
+                def c(i, r=row): return r[i].strip() if i < len(r) and r[i] else ""
+                sku = c(14)
+                if not sku or sku not in amazon_skus:
+                    continue  # Amazonに存在しないSKUは無視
+                sku_master[sku] = {
+                    "account":     account_name,
+                    "hanbai":      c(9),
+                    "shiire":      c(5),
+                    "shiire_date": c(4),
+                    "min_price":   c(30),
+                    "state":       c(17),
+                }
+        except Exception as e:
+            yield f"スプレッドシート({account_name})読み込みエラー: {e}"
+
+    # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
+    yield f"⑤ 価格・写真を取得中..."
+    products_api = Products(credentials=creds, marketplace=Marketplaces.JP)
+    offers_cache: dict[str, dict | None] = {}
+    folder_cache: dict[str, str | None] = {}
+    all_rows = []
+
+    for sku in sorted(amazon_skus):
+        fba    = fba_items.get(sku, {})
+        inbound = inbound_skus.get(sku, {})
+        sold   = sold_skus.get(sku, {})
+        master = sku_master.get(sku, {})
+
+        asin         = fba.get("asin") or inbound.get("asin") or ""
+        product_name = fba.get("product_name") or inbound.get("product_name") or ""
+
+        # ステータス・日付
+        total_qty = fba.get("total_qty", 0)
+        if total_qty > 0:
+            status       = "販売中"
+            fba_date     = ""
+            listing_date = fba.get("last_updated", "")
+            sold_date    = ""
+        elif inbound:
+            status       = "納品中"
+            fba_date     = ""
+            listing_date = ""
+            sold_date    = ""
+        elif sold:
+            status       = "売却済み"
+            fba_date     = ""
+            listing_date = fba.get("last_updated", "")
+            sold_date    = sold.get("purchase_date", "")
+        else:
+            # FBA在庫ゼロ・注文なし → 在庫切れ出品中 or 削除
+            status       = "在庫切れ"
+            fba_date = listing_date = sold_date = ""
+
+        # コンディション（FBA在庫APIの condition フィールドを優先）
+        cond_label = fba.get("condition", "")
+        state = master.get("state", "")
+        ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
+        if not cond_label:
+            cond_label = ct
+
+        # カート価格予想・FBAライバル数（販売中・納品中のみ）
+        cart_price = rival_count = ""
+        if status in ("販売中", "納品中", "在庫切れ") and asin:
+            if asin not in offers_cache:
+                offers_cache[asin] = _get_item_offers(products_api, asin)
+                time.sleep(1)
+            min_p, cnt = _analyze_fba_offers(offers_cache.get(asin), sub_cond)
+            if min_p is not None:
+                cart_price = str(min_p - 10)
+            rival_count = str(cnt)
+
+        # Drive 写真
+        photo_formula = ""
+        if sku not in folder_cache:
+            try:
+                folder_cache[sku] = _find_sku_folder(sku)
+            except Exception:
+                folder_cache[sku] = None
+        fid = folder_cache.get(sku)
+        if fid:
+            try:
+                imgs = _list_images(fid, max_count=1)
+                if imgs:
+                    photo_formula = f'=IMAGE("https://drive.google.com/thumbnail?id={imgs[0]["id"]}&sz=w200")'
+            except Exception:
+                pass
+
+        page_link = f'=HYPERLINK("https://www.amazon.co.jp/dp/{asin}", "{asin}")' if asin else ""
+        hanbai    = master.get("hanbai", "")
+
+        all_rows.append([
+            sku,
+            status,
+            product_name,
+            photo_formula,
+            page_link,
+            hanbai,
+            cart_price,
+            rival_count,
+            master.get("min_price", ""),
+            cond_label,
+            asin,
+            master.get("account", ""),
+            fba_date,
+            listing_date,
+            sold_date,
+            master.get("shiire", ""),
+            master.get("shiire_date", ""),
+        ])
+
+    yield f"合計 {len(all_rows)} 件集計完了"
+
+    # ── Step 5: スプレッドシート書き込み ────────────────────────────────
+    if out_spreadsheet_id:
+        ss_id  = out_spreadsheet_id
+        ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
+        yield "既存スプレッドシートをクリアして上書きします..."
+        svc.spreadsheets().values().clear(
+            spreadsheetId=ss_id, range="商品一覧!A1:T5000",
+        ).execute()
+    else:
+        yield "新規スプレッドシートを作成中..."
+        ss = svc.spreadsheets().create(body={
+            "properties": {"title": "Amazon商品サマリー"},
+            "sheets": [{"properties": {"title": "商品一覧"}}],
+        }).execute()
+        ss_id  = ss["spreadsheetId"]
+        ss_url = ss["spreadsheetUrl"]
+        yield f"作成完了: {ss_url}"
+
+    yield "データ書き込み中..."
+    svc.spreadsheets().values().update(
+        spreadsheetId=ss_id, range="商品一覧!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [_SUMMARY_HEADERS] + all_rows},
+    ).execute()
+
+    # 書式: 1行固定・行高120px・写真列160px
+    sheet_id = svc.spreadsheets().get(spreadsheetId=ss_id).execute()["sheets"][0]["properties"]["sheetId"]
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=ss_id,
+        body={"requests": [
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sheet_id,
+                               "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                          "startIndex": 1, "endIndex": len(all_rows) + 1},
+                "properties": {"pixelSize": 120}, "fields": "pixelSize",
+            }},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                          "startIndex": 3, "endIndex": 4},  # 写真列
+                "properties": {"pixelSize": 160}, "fields": "pixelSize",
+            }},
+        ]},
+    ).execute()
+
+    yield f"完了！ {len(all_rows)} 件を書き込みました"
+    yield f"URL: {ss_url}"
