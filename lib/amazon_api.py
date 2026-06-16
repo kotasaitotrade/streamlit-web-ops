@@ -1374,6 +1374,48 @@ _SUMMARY_ACCOUNTS = {
     "kudo": "1keLLdpDRu2l9AjHyM6qRe_W8FFH_Jtl-isb1XFp8MzA",
 }
 
+# Amazon API のコンディションコード → 日本語表記
+_CONDITION_JA = {
+    # FBA inventory API が返す形式（複数パターン対応）
+    "used_very_good":  "非常に良い",
+    "used_good":       "良い",
+    "used_acceptable": "可",
+    "new":             "新品",
+    "used":            "中古",
+    "usedlikebew":     "ほぼ新品",
+    "UsedLikeNew":     "ほぼ新品",
+    "UsedVeryGood":    "非常に良い",
+    "UsedGood":        "良い",
+    "UsedAcceptable":  "可",
+    "NewItem":         "新品",
+    "USED_LIKE_NEW":   "ほぼ新品",
+    "USED_VERY_GOOD":  "非常に良い",
+    "USED_GOOD":       "良い",
+    "USED_ACCEPTABLE": "可",
+    "NEW":             "新品",
+    "USED":            "中古",
+}
+
+def _kanri_id_from_sku(sku: str) -> str:
+    """SKUから管理IDを抽出する。
+    RS00011ST12000260512 → RS00011ST （末尾の価格+6桁日付を除去）
+    RS KT00092 → RS KT00092 （数字が10桁未満なら変換しない）
+    """
+    import re
+    m = re.match(r'^(.+?)\d{10,}$', sku)
+    return m.group(1) if m else sku
+
+def _price_from_sku(sku: str, kanri_id: str) -> str:
+    """SKUに埋め込まれた販売価格を取り出す。
+    RS00011ST12000260512, kanri_id=RS00011ST → 12000
+    """
+    if not kanri_id or not sku.startswith(kanri_id):
+        return ""
+    suffix = sku[len(kanri_id):]   # 例: 12000260512
+    if len(suffix) < 7:            # 最低 1桁価格 + 6桁日付
+        return ""
+    return suffix[:-6]             # 末尾6桁（YYMMDD）を除いた残りが価格
+
 _SUMMARY_HEADERS = [
     "SKU", "ステータス", "商品名", "写真", "商品ページ",
     "販売価格", "カート価格予想", "FBAライバル数", "最低販売価格", "コンディション",
@@ -1502,7 +1544,9 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     amazon_skus = set(fba_items) | set(inbound_skus) | set(sold_skus)
     yield f"④ Amazon商品数: {len(amazon_skus)} SKU。スプレッドシートで補足中..."
 
-    sku_master: dict[str, dict] = {}
+    # kanri_master: 管理ID（列A）をキーにしてスプレッドシートの補足情報を格納
+    # SKUはAmazonが更新するたびに価格+日付が変わるため、管理IDでマッチングする
+    kanri_master: dict[str, dict] = {}
     for account_name, ssid in _SUMMARY_ACCOUNTS.items():
         try:
             result = svc.spreadsheets().values().get(
@@ -1510,19 +1554,21 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             ).execute()
             for row in result.get("values", []):
                 def c(i, r=row): return r[i].strip() if i < len(r) and r[i] else ""
-                sku = c(14)
-                if not sku or sku not in amazon_skus:
-                    continue  # Amazonに存在しないSKUは無視
-                sku_master[sku] = {
+                kanri_id = c(0)   # A列: 管理ID（RS00011ST など）
+                if not kanri_id:
+                    continue
+                kanri_master[kanri_id] = {
                     "account":     account_name,
-                    "hanbai":      c(9),
-                    "shiire":      c(5),
-                    "shiire_date": c(4),
-                    "min_price":   c(30),
-                    "state":       c(17),
+                    "asin_ss":     c(15),  # P列: ASIN（売却済みで在庫APIにない場合の補完）
+                    "hanbai":      c(9),   # J列: 販売価格
+                    "shiire":      c(5),   # F列: 仕入れ値
+                    "shiire_date": c(4),   # E列: 仕入れ日
+                    "min_price":   c(30),  # AE列: 最低販売価格
+                    "state":       c(17),  # R列: 状態（コンディション判定用）
                 }
         except Exception as e:
             yield f"スプレッドシート({account_name})読み込みエラー: {e}"
+    yield f"  スプレッドシート補足: {len(kanri_master)} 管理ID"
 
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
     yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
@@ -1534,12 +1580,16 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     all_rows = []
 
     for sku in sorted(amazon_skus):
-        fba    = fba_items.get(sku, {})
+        fba     = fba_items.get(sku, {})
         inbound = inbound_skus.get(sku, {})
-        sold   = sold_skus.get(sku, {})
-        master = sku_master.get(sku, {})
+        sold    = sold_skus.get(sku, {})
 
-        asin         = fba.get("asin") or inbound.get("asin") or ""
+        # 管理IDでスプレッドシート補足データを取得（SKUに埋め込まれた管理IDを抽出）
+        kanri_id = _kanri_id_from_sku(sku)
+        master   = kanri_master.get(kanri_id, {})
+
+        # ASIN: FBA在庫API優先、次にスプレッドシートのP列（売却済みで在庫なしの場合）
+        asin         = fba.get("asin") or inbound.get("asin") or master.get("asin_ss", "") or ""
         product_name = fba.get("product_name") or inbound.get("product_name") or ""
 
         # ステータス・日付
@@ -1560,19 +1610,49 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             listing_date = fba.get("last_updated", "")
             sold_date    = sold.get("purchase_date", "")
         else:
-            # FBA在庫ゼロ・注文なし → 在庫切れ出品中 or 削除
             status       = "在庫切れ"
             fba_date = listing_date = sold_date = ""
 
-        # コンディション（FBA在庫APIの condition フィールドを優先）
-        cond_label = fba.get("condition", "")
-        state = master.get("state", "")
-        ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
-        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
+        # コンディション: FBA APIの値を日本語に変換
+        cond_raw   = fba.get("condition", "")
+        cond_label = (_CONDITION_JA.get(cond_raw)
+                      or _CONDITION_JA.get(cond_raw.lower())
+                      or "")
         if not cond_label:
-            cond_label = ct
+            # FBA APIに値がない場合はスプレッドシートのR列（状態）から判定
+            state = master.get("state", "")
+            ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+            cond_label = _CONDITION_JA.get(ct, "良い")
+        sub_cond = _SUBCONDITION_MAP.get(
+            {v: k for k, v in _CONDITION_JA.items()}.get(cond_label, "used_good"),
+            "good"
+        )
+        # sub_condを直接導出（逆引きが複雑なので state→ct→sub_cond で再計算）
+        state    = master.get("state", "")
+        ct, _    = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
+        if not fba.get("condition"):
+            # FBA APIにconditionがない場合のみ sub_cond をスプレッドシート由来で使う
+            pass  # sub_cond は上で計算済み
+        else:
+            # FBA APIのconditionからsub_condを導出
+            cond_to_sub = {
+                "used_very_good": "very_good",
+                "used_good":      "good",
+                "used_acceptable":"acceptable",
+                "new":            "new",
+                "USED_VERY_GOOD": "very_good",
+                "USED_GOOD":      "good",
+                "USED_ACCEPTABLE":"acceptable",
+                "NEW":            "new",
+                "UsedVeryGood":   "very_good",
+                "UsedGood":       "good",
+                "UsedAcceptable": "acceptable",
+                "NewItem":        "new",
+            }
+            sub_cond = cond_to_sub.get(cond_raw, sub_cond)
 
-        # カート価格予想・FBAライバル数（販売中・納品中のみ）
+        # カート価格予想・FBAライバル数
         cart_price = rival_count = ""
         if status in ("販売中", "納品中", "在庫切れ") and asin:
             if asin not in offers_cache:
@@ -1583,11 +1663,24 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                 cart_price = str(min_p - 10)
             rival_count = str(cnt)
 
-        # Drive 写真
+        # Drive 写真: まずフルSKU、なければ管理IDプレフィックスで検索
         photo_formula = ""
         if sku not in folder_cache:
             try:
-                folder_cache[sku] = _find_sku_folder(sku)
+                fid_exact = _find_sku_folder(sku)
+                if fid_exact:
+                    folder_cache[sku] = fid_exact
+                elif kanri_id and kanri_id != sku:
+                    # 管理IDで始まる任意フォルダを前方一致検索
+                    q = (f"'{_drive_folder_id()}' in parents"
+                         f" and name contains '{kanri_id}'"
+                         " and mimeType='application/vnd.google-apps.folder'"
+                         " and trashed=false")
+                    res = _drive_service().files().list(q=q, fields="files(id,name)").execute()
+                    folders = res.get("files", [])
+                    folder_cache[sku] = folders[0]["id"] if folders else None
+                else:
+                    folder_cache[sku] = None
             except Exception:
                 folder_cache[sku] = None
         fid = folder_cache.get(sku)
@@ -1600,7 +1693,9 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                 pass
 
         page_link = f'=HYPERLINK("https://www.amazon.co.jp/dp/{asin}", "{asin}")' if asin else ""
-        hanbai    = master.get("hanbai", "")
+
+        # 販売価格: SKUに埋め込まれた価格を優先、なければスプレッドシートJ列
+        hanbai = _price_from_sku(sku, kanri_id) or master.get("hanbai", "")
 
         all_rows.append([
             sku,
