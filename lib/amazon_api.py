@@ -1429,14 +1429,16 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     """generator: Amazon APIのみをベースにしたサマリーシートを作成/更新する。
 
     データソース（Amazon API が主役）:
-      - FBA Inventory API   → 販売中（在庫あり）
-      - FBA Inbound API     → 納品中（Amazon倉庫に向かっている / 受け取り中）
-      - Orders API (1年)    → 売却済み
-      スプレッドシートは仕入れ値・写真など補足データのみに使用。
-      スプレッドシートにしかない商品は表示しない。
+      - FBA Inventory API        → 販売中（在庫あり）
+      - FBA Inbound ACTIVE       → 納品中
+      - FBA Inbound CLOSED       → FBA納品日（ShipmentNameから日付パース）
+      - CatalogItems API         → Amazon商品画像
+      - Orders API (1年)         → 売却済み
+      スプレッドシートは仕入れ値など補足データのみに使用。
     """
     import datetime as dt
-    from sp_api.api import Inventories, Orders as OrdersAPI, Products, FulfillmentInboundV0
+    import re
+    from sp_api.api import Inventories, Orders as OrdersAPI, Products, FulfillmentInboundV0, CatalogItems
     from sp_api.base import Marketplaces
 
     svc = _sheets_service()
@@ -1501,6 +1503,17 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         if sku in fba_items:
             del inbound_skus[sku]
     yield f"  → {len(inbound_skus)} SKU（納品中）"
+
+    # ── Step 2b: FBA納品日マップ（FBA在庫の lastUpdatedTime を利用）─────
+    # shipment_items_by_shipment はネットワークハングが発生するため使わない。
+    # FBA在庫APIの lastUpdatedTime（在庫が最後に更新された日時）で代替する。
+    fba_date_map: dict[str, str] = {}  # kanri_id → 日付文字列
+    for sku, data in fba_items.items():
+        kid = _kanri_id_from_sku(sku)
+        lu = data.get("last_updated", "")  # 例: "2026-05-26T..."
+        if lu and kid not in fba_date_map:
+            fba_date_map[kid] = lu[:10]   # YYYY-MM-DD 部分だけ
+    yield f"② FBA納品日: {len(fba_date_map)} 件取得（FBA在庫更新日時より）"
 
     # ── Step 3: 注文履歴（売却済み） ────────────────────────────────────
     yield "③ 注文履歴を取得中（過去1年）..."
@@ -1575,9 +1588,17 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     if not amazon_skus:
         yield "⚠️ Amazon APIから商品が0件でした。認証エラーか在庫・注文が存在しない可能性があります。"
     products_api = Products(credentials=creds, marketplace=Marketplaces.JP)
-    offers_cache: dict[str, dict | None] = {}
-    folder_cache: dict[str, str | None] = {}
+    cat_api      = CatalogItems(credentials=creds, marketplace=Marketplaces.JP)
+    offers_cache: dict[str, dict | None] = {}  # asin → payload
+    image_cache:  dict[str, str]         = {}  # asin → image URL
     all_rows = []
+
+    _COND_TO_SUBCOND = {
+        "used_very_good": "very_good", "USED_VERY_GOOD": "very_good", "UsedVeryGood": "very_good",
+        "used_good":      "good",      "USED_GOOD":      "good",      "UsedGood":      "good",
+        "used_acceptable":"acceptable","USED_ACCEPTABLE":"acceptable","UsedAcceptable":"acceptable",
+        "new":            "new",       "NEW":            "new",       "NewItem":       "new",
+    }
 
     for sku in sorted(amazon_skus):
         fba     = fba_items.get(sku, {})
@@ -1592,105 +1613,89 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         asin         = fba.get("asin") or inbound.get("asin") or master.get("asin_ss", "") or ""
         product_name = fba.get("product_name") or inbound.get("product_name") or ""
 
+        # FBA納品日: CLOSEDシップメントから取得した kanri_id → 日付マップを参照
+        fba_date = fba_date_map.get(kanri_id, "")
+
         # ステータス・日付
         total_qty = fba.get("total_qty", 0)
         if total_qty > 0:
             status       = "販売中"
-            fba_date     = ""
             listing_date = fba.get("last_updated", "")
             sold_date    = ""
         elif inbound:
             status       = "納品中"
-            fba_date     = ""
             listing_date = ""
             sold_date    = ""
         elif sold:
             status       = "売却済み"
-            fba_date     = ""
             listing_date = fba.get("last_updated", "")
             sold_date    = sold.get("purchase_date", "")
         else:
             status       = "在庫切れ"
-            fba_date = listing_date = sold_date = ""
+            listing_date = sold_date = ""
 
         # コンディション: FBA APIの値を日本語に変換
         cond_raw   = fba.get("condition", "")
-        cond_label = (_CONDITION_JA.get(cond_raw)
-                      or _CONDITION_JA.get(cond_raw.lower())
-                      or "")
+        cond_label = _CONDITION_JA.get(cond_raw) or _CONDITION_JA.get(cond_raw.lower()) or ""
         if not cond_label:
-            # FBA APIに値がない場合はスプレッドシートのR列（状態）から判定
             state = master.get("state", "")
             ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
             cond_label = _CONDITION_JA.get(ct, "良い")
-        sub_cond = _SUBCONDITION_MAP.get(
-            {v: k for k, v in _CONDITION_JA.items()}.get(cond_label, "used_good"),
-            "good"
-        )
-        # sub_condを直接導出（逆引きが複雑なので state→ct→sub_cond で再計算）
-        state    = master.get("state", "")
-        ct, _    = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
-        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
-        if not fba.get("condition"):
-            # FBA APIにconditionがない場合のみ sub_cond をスプレッドシート由来で使う
-            pass  # sub_cond は上で計算済み
-        else:
-            # FBA APIのconditionからsub_condを導出
-            cond_to_sub = {
-                "used_very_good": "very_good",
-                "used_good":      "good",
-                "used_acceptable":"acceptable",
-                "new":            "new",
-                "USED_VERY_GOOD": "very_good",
-                "USED_GOOD":      "good",
-                "USED_ACCEPTABLE":"acceptable",
-                "NEW":            "new",
-                "UsedVeryGood":   "very_good",
-                "UsedGood":       "good",
-                "UsedAcceptable": "acceptable",
-                "NewItem":        "new",
-            }
-            sub_cond = cond_to_sub.get(cond_raw, sub_cond)
+        # sub_cond: FBA APIのconditionから直接導出、なければスプレッドシート由来
+        sub_cond = _COND_TO_SUBCOND.get(cond_raw, "")
+        if not sub_cond:
+            state    = master.get("state", "")
+            ct, _    = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+            sub_cond = _SUBCONDITION_MAP.get(ct, "good")
 
-        # カート価格予想・FBAライバル数
+        # カート価格予想・FBAライバル数（QuotaExceeded リトライ付き）
         cart_price = rival_count = ""
         if status in ("販売中", "納品中", "在庫切れ") and asin:
             if asin not in offers_cache:
-                offers_cache[asin] = _get_item_offers(products_api, asin)
-                time.sleep(1)
+                payload = None
+                for attempt in range(3):
+                    try:
+                        resp = products_api.get_item_offers(asin=asin, item_condition="Used")
+                        payload = resp.payload
+                        break
+                    except Exception as e:
+                        if "QuotaExceeded" in str(e) and attempt < 2:
+                            time.sleep(6 * (attempt + 1))  # 6s, 12s
+                        else:
+                            break
+                offers_cache[asin] = payload
+                time.sleep(2.5)  # SP-API pricing: 0.5 req/s 上限
             min_p, cnt = _analyze_fba_offers(offers_cache.get(asin), sub_cond)
             if min_p is not None:
                 cart_price = str(min_p - 10)
             rival_count = str(cnt)
 
-        # Drive 写真: まずフルSKU、なければ管理IDプレフィックスで検索
+        # Amazon商品画像（CatalogItems API）
         photo_formula = ""
-        if sku not in folder_cache:
-            try:
-                fid_exact = _find_sku_folder(sku)
-                if fid_exact:
-                    folder_cache[sku] = fid_exact
-                elif kanri_id and kanri_id != sku:
-                    # 管理IDで始まる任意フォルダを前方一致検索
-                    q = (f"'{_drive_folder_id()}' in parents"
-                         f" and name contains '{kanri_id}'"
-                         " and mimeType='application/vnd.google-apps.folder'"
-                         " and trashed=false")
-                    res = _drive_service().files().list(q=q, fields="files(id,name)").execute()
-                    folders = res.get("files", [])
-                    folder_cache[sku] = folders[0]["id"] if folders else None
-                else:
-                    folder_cache[sku] = None
-            except Exception:
-                folder_cache[sku] = None
-        fid = folder_cache.get(sku)
-        if fid:
-            try:
-                imgs = _list_images(fid, max_count=1)
-                if imgs:
-                    photo_formula = f'=IMAGE("https://drive.google.com/thumbnail?id={imgs[0]["id"]}&sz=w200")'
-            except Exception:
-                pass
+        if asin:
+            if asin not in image_cache:
+                try:
+                    r = cat_api.get_catalog_item(
+                        asin=asin,
+                        marketplaceIds=[_marketplace_id()],
+                        includedData=["images"],
+                    )
+                    img_url = ""
+                    for img_set in r.payload.get("images", []):
+                        if img_set.get("marketplaceId") == _marketplace_id():
+                            main_imgs = [i for i in img_set.get("images", [])
+                                         if i.get("variant") == "MAIN"]
+                            if main_imgs:
+                                best = max(main_imgs, key=lambda i: i.get("height", 0))
+                                img_url = best.get("link", "")
+                            break
+                    image_cache[asin] = img_url
+                    time.sleep(0.5)
+                except Exception:
+                    image_cache[asin] = ""
+            url = image_cache.get(asin, "")
+            if url:
+                photo_formula = f'=IMAGE("{url}")'
 
         page_link = f'=HYPERLINK("https://www.amazon.co.jp/dp/{asin}", "{asin}")' if asin else ""
 
