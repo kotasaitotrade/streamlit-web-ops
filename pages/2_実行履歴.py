@@ -29,14 +29,15 @@ if not jobs:
     st.stop()
 
 df = pd.DataFrame(jobs)
-status_color = {
-    "queued": "🟡",
-    "running": "🔵",
-    "success": "🟢",
-    "failed": "🔴",
-    "canceled": "⚪",
+# アイコン（色）＋日本語ラベルで状態を表示（色だけに依存しない）
+status_label = {
+    "queued":   "🟡 待機中",
+    "running":  "🔵 実行中",
+    "success":  "🟢 成功",
+    "failed":   "🔴 失敗",
+    "canceled": "⚪ キャンセル",
 }
-df["状態"] = df["status"].map(lambda s: f"{status_color.get(s, '⚪')} {s}")
+df["状態"] = df["status"].map(lambda s: status_label.get(s, f"⚪ {s}"))
 
 # 日時を読みやすい形式（YYYY-MM-DD HH:MM）に整形
 for col in ["requested_at", "started_at", "finished_at"]:
