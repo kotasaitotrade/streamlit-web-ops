@@ -141,30 +141,30 @@ st.caption(f"販売中・納品中: {len(items)} 件 | [スプレッドシート
 # カード一覧
 # ============================================================
 for i, item in enumerate(items):
-    cart     = item["カート獲得"]
-    cart_icon = "🛒" if cart == "○" else ("△" if cart == "△" else "✗")
+    cart = item["カート獲得"]
+    cart_icon = "🛒 " if cart == "○" else ("△ " if cart == "△" else "")
     status_badge = "🟡 " if item["状態"] == "納品中" else ""
-    price_str  = _fmt_price(item["販売価格"])
-    cprice_str = _fmt_price(item["カート価格"])
-    fmin       = item["同コンFBA最低"]
-    fmin_str   = _fmt_price(fmin) if fmin else "－"
-    cond_str   = item["コンディション"] or item["状態"]
+    price_str = _fmt_price(item["販売価格"])
+    cond_str  = item["コンディション"] or item["状態"]
 
-    with st.container(border=True):
-        # ── 商品名
-        st.markdown(f"**{status_badge}{item['商品名'][:30]}**")
+    header = f"{status_badge}{cart_icon}{item['商品名'][:22]}  　{cond_str}  　{price_str}"
 
-        # ── 基本情報（常時表示）
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(f"**状態**\n{cond_str}")
-        c2.markdown(f"**販売価格**\n{price_str}")
-        c3.markdown(f"**カート**\n{cart_icon}")
+    with st.expander(header, expanded=False):
+        # 詳細情報
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown(f"**管理ID** : {item['管理ID']}")
+            st.markdown(f"**状態** : {item['状態']}")
+            st.markdown(f"**カート** : {cart or '－'}")
+            st.markdown(f"**カート価格** : {_fmt_price(item['カート価格'])}")
+        with col_r:
+            st.markdown(f"**カート状態** : {item['カート状態'] or '－'}")
+            fmin = item["同コンFBA最低"]
+            st.markdown(f"**同コンFBA最低** : {_fmt_price(fmin) if fmin else '－'}")
+            if item["URL"]:
+                st.link_button("🔗 商品ページを開く", item["URL"], use_container_width=True)
 
-        c4, c5 = st.columns(2)
-        c4.markdown(f"**カート価格**\n{cprice_str}")
-        c5.markdown(f"**同コンFBA最低**\n{fmin_str}")
-
-        # ── 変更金額入力
+        # 変更金額入力
         default_val = None
         try:
             default_val = int(float(item["変更金額_default"])) if item["変更金額_default"] else None
@@ -176,16 +176,10 @@ for i, item in enumerate(items):
             min_value=1,
             value=default_val,
             step=100,
-            placeholder="変更しない場合は空欄",
+            placeholder="変更しない場合は空欄のまま",
             key=f"price_{i}",
+            label_visibility="visible",
         )
-
-        # ── 詳細（折り畳み）
-        with st.expander("詳細"):
-            st.markdown(f"**管理ID** : `{item['管理ID']}`")
-            st.markdown(f"**カート状態** : {item['カート状態'] or '－'}")
-            if item["URL"]:
-                st.link_button("🔗 商品ページ", item["URL"], use_container_width=True)
 
 st.divider()
 
