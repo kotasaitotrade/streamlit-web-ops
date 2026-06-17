@@ -570,10 +570,16 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
         yield f"  → 競合最安値={min_competitor:,}円 / ライバル={rival_count} / 目標={target:,}円 {direction}"
 
         if target < t["floor"]:
-            yield f"  → 下限({t['floor']:,}円)を下回るためスキップ"
-            _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
-            skipped += 1
-            continue
+            if t["floor_manual"]:
+                # 設定価格(AE列)が手動設定されている → その-5%を適用
+                target = int(t["floor"] * 0.95)
+                yield f"  → 下限({t['floor']:,}円)を下回るため、設定価格-5%={target:,}円に変更"
+            else:
+                # 下限が現在価格のデフォルト → スキップ
+                yield f"  → 下限({t['floor']:,}円 ≒ 現在価格)を下回るためスキップ"
+                _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
+                skipped += 1
+                continue
 
         if target == t["current"]:
             yield f"  → 変更不要（すでに目標価格）"
