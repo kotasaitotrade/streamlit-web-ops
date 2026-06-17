@@ -71,15 +71,29 @@ def _cell(row, idx, default=""):
         return default
     return str(val).strip()
 
-if st.button("🔄 最新データを読み込む", key="reload"):
+if st.button("🔄 Amazonから最新データを取得", key="reload"):
+    log_area = st.empty()
+    lines = []
+    try:
+        for msg in amazon.run_create_summary_sheet(SUMMARY_SS_ID):
+            lines.append(msg)
+            log_area.markdown(
+                '<div style="background:#1e1e1e;color:#d4d4d4;font-family:monospace;'
+                'font-size:11px;padding:8px;border-radius:6px;white-space:pre-wrap;'
+                f'max-height:200px;overflow-y:auto">' + "\n".join(lines[-40:]) + "</div>",
+                unsafe_allow_html=True,
+            )
+        log_area.success("✅ 取得完了")
+    except Exception as e:
+        log_area.error(f"エラー: {e}")
     load_summary.clear()
     st.rerun()
 
-with st.spinner("サマリーシート読み込み中..."):
+with st.spinner("スプレッドシートからデータを読み込み中..."):
     raw = load_summary()
 
 if len(raw) < 2:
-    st.warning("データがありません。まず「Amazon出品管理 → 商品サマリー → サマリーを更新」を実行してください。")
+    st.warning("データがありません。「Amazonから最新データを取得」ボタンを押してください。")
     st.stop()
 
 # 販売中のみ抽出
