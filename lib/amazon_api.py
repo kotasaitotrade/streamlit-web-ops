@@ -383,13 +383,14 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
     }
 
     if not payload:
-        return None, "", None, "", 0, None, False
+        return None, "", None, "", 0, None, False, False, False
 
     cart_price = cart_cond = None
     lowest_price = lowest_cond = None
     fba_rival_count = 0
     fba_min_price = None
     is_winning = False
+    my_offer_exists = False
 
     for offer in payload.get("Offers", []):
         try:
@@ -410,8 +411,10 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
             cart_price = price
             cart_cond  = label
 
-        if my_offer and is_bb:
-            is_winning = True
+        if my_offer:
+            my_offer_exists = True
+            if is_bb:
+                is_winning = True
 
         if lowest_price is None or price < lowest_price:
             lowest_price = price
@@ -422,27 +425,36 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
             if fba_min_price is None or price < fba_min_price:
                 fba_min_price = price
 
-    # フォールバック: BuyBoxPrices から cart_price を補完
+    # 新品がメインカートを取っているか（BuyBoxPrices に cond=New が含まれる）
+    buy_box_prices = payload.get("Summary", {}).get("BuyBoxPrices", [])
+    has_new_buybox = any(
+        bb.get("condition", "").lower() in ("new", "新品")
+        for bb in buy_box_prices
+    )
+
+    # フォールバック: BuyBoxPrices から cart_price を補完（Used限定）
     if cart_price is None:
-        for bb in payload.get("Summary", {}).get("BuyBoxPrices", []):
-            try:
-                cart_price = int(float(bb["LandedPrice"]["Amount"]))
-                cart_cond  = _SUBCOND_JA.get(bb.get("condition", "").lower(), "") + "(Amazon)"
-                break
-            except Exception:
-                pass
+        for bb in buy_box_prices:
+            if bb.get("condition", "").lower() not in ("new", "新品"):
+                try:
+                    cart_price = int(float(bb["LandedPrice"]["Amount"]))
+                    cart_cond  = _SUBCOND_JA.get(bb.get("condition", "").lower(), "") + "(Amazon)"
+                    break
+                except Exception:
+                    pass
 
     # フォールバック: fba_min_price (カート価格予想用)
     if fba_min_price is None:
-        for bb in payload.get("Summary", {}).get("BuyBoxPrices", []):
-            try:
-                p = int(float(bb["LandedPrice"]["Amount"]))
-                if fba_min_price is None or p < fba_min_price:
-                    fba_min_price = p
-            except Exception:
-                pass
+        for bb in buy_box_prices:
+            if bb.get("condition", "").lower() not in ("new", "新品"):
+                try:
+                    p = int(float(bb["LandedPrice"]["Amount"]))
+                    if fba_min_price is None or p < fba_min_price:
+                        fba_min_price = p
+                except Exception:
+                    pass
 
-    return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price, is_winning
+    return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price, is_winning, has_new_buybox, my_offer_exists
 
 
 def _batch_write_reprice(sheet_row: int, cart_price: int | None, rival_count: int,
@@ -1526,17 +1538,22 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     inv_api = Inventories(credentials=creds, marketplace=Marketplaces.JP)
     fba_items: dict[str, dict] = {}  # sku -> {asin, product_name, condition, last_updated, total_qty}
     try:
-        resp = inv_api.get_inventory_summary_marketplace(marketplaceId=_marketplace_id())
+        resp = inv_api.get_inventory_summary_marketplace(
+            marketplaceId=_marketplace_id(), details=True
+        )
         for item in resp.payload.get("inventorySummaries", []):
             sku = item.get("sellerSku", "")
             if not sku:
                 continue
+            det = item.get("inventoryDetails", {})
+            fulfillable = det.get("fulfillableQuantity", 0)
             fba_items[sku] = {
-                "asin":         item.get("asin", ""),
-                "product_name": item.get("productName", ""),
-                "condition":    item.get("condition", ""),
-                "last_updated": (item.get("lastUpdatedTime") or "")[:10],
-                "total_qty":    item.get("totalQuantity", 0),
+                "asin":           item.get("asin", ""),
+                "product_name":   item.get("productName", ""),
+                "condition":      item.get("condition", ""),
+                "last_updated":   (item.get("lastUpdatedTime") or "")[:10],
+                "total_qty":      item.get("totalQuantity", 0),
+                "fulfillable_qty": fulfillable,  # 実際に販売可能な数量
             }
     except Exception as e:
         yield f"FBA在庫取得エラー: {e}"
@@ -1700,7 +1717,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     yield f"  → 出品価格取得: {len(listing_price_map)} 件"
 
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
-    yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
+    yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('fulfillable_qty', s.get('total_qty',0))>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
     if not amazon_skus:
         yield "⚠️ Amazon APIから商品が0件でした。認証エラーか在庫・注文が存在しない可能性があります。"
     products_api = Products(credentials=creds, marketplace=Marketplaces.JP)
@@ -1733,12 +1750,15 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         fba_date = fba_date_map.get(kanri_id, "")
 
         # ステータス・日付
-        total_qty = fba.get("total_qty", 0)
-        if total_qty > 0:
+        # fulfillable_qty = 実際に販売可能な数量（total_qty はinbound含むため使わない）
+        total_qty      = fba.get("total_qty", 0)
+        fulfillable_qty = fba.get("fulfillable_qty", total_qty)  # detailsなしの場合はtotalで代替
+        if fulfillable_qty > 0:
             status       = "販売中"
             listing_date = fba.get("last_updated", "")
             sold_date    = ""
-        elif inbound:
+        elif inbound or total_qty > 0:
+            # inbound_skus にある or FBA在庫あり(fulfillable=0) → 納品中
             status       = "納品中"
             listing_date = ""
             sold_date    = ""
@@ -1787,7 +1807,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                             break
                 offers_cache[sku] = payload
                 time.sleep(2.5)  # SP-API pricing: 0.5 req/s 上限
-            c_price, c_cond, low_p, low_cond, rival_cnt, fba_min, winning = _extract_offer_details(
+            c_price, c_cond, low_p, low_cond, rival_cnt, fba_min, winning, has_new_bb, my_offer = _extract_offer_details(
                 offers_cache.get(sku), sub_cond
             )
             if c_price is not None:
@@ -1799,7 +1819,17 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             rival_count = str(rival_cnt)
             if fba_min is not None:
                 cart_price_yoso = str(fba_min - 10)
-            buybox_status = "○" if winning else "✗"
+            # ○: 自分がカート獲得
+            # △: 新品がメインカートで自分は中古として出品中
+            # ✗: カート未獲得
+            if winning:
+                buybox_status = "○"
+            elif my_offer and has_new_bb:
+                buybox_status = "△"
+            elif my_offer:
+                buybox_status = "✗"
+            else:
+                buybox_status = "✗"
 
         # Amazon商品画像（CatalogItems API）
         photo_formula = ""
