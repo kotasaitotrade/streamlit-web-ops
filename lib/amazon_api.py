@@ -368,6 +368,77 @@ def _analyze_fba_offers(payload: dict | None, sub_condition: str) -> tuple[int |
     return min_price, 0
 
 
+def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
+    """get_item_offers のペイロードから詳細情報を抽出する。
+    Returns: (cart_price, cart_cond, lowest_price, lowest_cond, fba_rival_count, fba_min_price)
+      - cart_price/cart_cond: 現在のカート獲得者の価格と状態
+      - lowest_price/lowest_cond: 全出品者の中で最安値の価格と状態
+      - fba_rival_count: 同コンディション・FBA の競合数
+      - fba_min_price: 同コンディション FBA の最安値（カート価格予想算出用）
+    """
+    _SUBCOND_JA = {
+        "new": "新品", "mint": "ほぼ新品",
+        "very_good": "非常に良い", "good": "良い", "acceptable": "可",
+    }
+
+    if not payload:
+        return None, "", None, "", 0, None
+
+    cart_price = cart_cond = None
+    lowest_price = lowest_cond = None
+    fba_rival_count = 0
+    fba_min_price = None
+
+    for offer in payload.get("Offers", []):
+        try:
+            price = int(float(offer["ListingPrice"]["Amount"]))
+        except Exception:
+            continue
+
+        sub  = offer.get("SubCondition", "").lower()
+        is_fba  = offer.get("IsFulfilledByAmazon", False)
+        is_prime = offer.get("PrimeInformation", {}).get("IsPrime", False)
+        is_bb   = offer.get("IsBuyBoxWinner", False)
+        cond_ja = _SUBCOND_JA.get(sub, sub or "不明")
+        channel = "Amazon" if is_fba else "出品者"
+        label   = f"{cond_ja}({channel})"
+
+        if is_bb:
+            cart_price = price
+            cart_cond  = label
+
+        if lowest_price is None or price < lowest_price:
+            lowest_price = price
+            lowest_cond  = label
+
+        if is_prime and sub == sub_condition.lower():
+            fba_rival_count += 1
+            if fba_min_price is None or price < fba_min_price:
+                fba_min_price = price
+
+    # フォールバック: BuyBoxPrices から cart_price を補完
+    if cart_price is None:
+        for bb in payload.get("Summary", {}).get("BuyBoxPrices", []):
+            try:
+                cart_price = int(float(bb["LandedPrice"]["Amount"]))
+                cart_cond  = _SUBCOND_JA.get(bb.get("condition", "").lower(), "") + "(Amazon)"
+                break
+            except Exception:
+                pass
+
+    # フォールバック: fba_min_price (カート価格予想用)
+    if fba_min_price is None:
+        for bb in payload.get("Summary", {}).get("BuyBoxPrices", []):
+            try:
+                p = int(float(bb["LandedPrice"]["Amount"]))
+                if fba_min_price is None or p < fba_min_price:
+                    fba_min_price = p
+            except Exception:
+                pass
+
+    return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price
+
+
 def _batch_write_reprice(sheet_row: int, cart_price: int | None, rival_count: int,
                          new_price: int | None, spreadsheet_id=None):
     """X列(カート価格予想)・Y列(ライバル数) を常に書き込む。
@@ -1418,7 +1489,7 @@ def _price_from_sku(sku: str, kanri_id: str) -> str:
 
 _SUMMARY_HEADERS = [
     "SKU", "ステータス", "商品名", "写真", "商品ページ",
-    "販売価格", "カート価格予想", "FBAライバル数", "最低販売価格", "コンディション",
+    "販売価格", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格", "コンディション",
     "ASIN", "アカウント",
     "FBA納品日", "出品日", "売却日",
     "仕入れ値", "仕入れ日",
@@ -1687,8 +1758,10 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             ct, _    = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
             sub_cond = _SUBCONDITION_MAP.get(ct, "good")
 
-        # カート価格予想・FBAライバル数（QuotaExceeded リトライ付き）
-        cart_price = rival_count = ""
+        # カート価格・最低価格・FBAライバル数（QuotaExceeded リトライ付き）
+        cart_price_actual = cart_cond_str = ""
+        cart_price_yoso   = rival_count   = ""
+        lowest_price_str  = lowest_cond_str = ""
         if status in ("販売中", "納品中", "在庫切れ") and asin:
             if asin not in offers_cache:
                 payload = None
@@ -1704,10 +1777,18 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                             break
                 offers_cache[asin] = payload
                 time.sleep(2.5)  # SP-API pricing: 0.5 req/s 上限
-            min_p, cnt = _analyze_fba_offers(offers_cache.get(asin), sub_cond)
-            if min_p is not None:
-                cart_price = str(min_p - 10)
-            rival_count = str(cnt)
+            c_price, c_cond, low_p, low_cond, rival_cnt, fba_min = _extract_offer_details(
+                offers_cache.get(asin), sub_cond
+            )
+            if c_price is not None:
+                cart_price_actual = str(c_price)
+            cart_cond_str = c_cond
+            if low_p is not None:
+                lowest_price_str = str(low_p)
+            lowest_cond_str = low_cond
+            rival_count = str(rival_cnt)
+            if fba_min is not None:
+                cart_price_yoso = str(fba_min - 10)
 
         # Amazon商品画像（CatalogItems API）
         photo_formula = ""
@@ -1754,7 +1835,11 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             photo_formula,
             page_link,
             hanbai,
-            cart_price,
+            cart_price_actual,   # カート価格（現在のカート獲得者の価格）
+            cart_cond_str,       # カート状態
+            cart_price_yoso,     # カート価格予想（同条件FBA最安値-10円）
+            lowest_price_str,    # 最低価格（全出品者の中の最安値）
+            lowest_cond_str,     # 最低価格状態
             rival_count,
             master.get("min_price", ""),
             cond_label,
