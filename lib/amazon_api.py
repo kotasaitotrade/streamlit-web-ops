@@ -1489,7 +1489,7 @@ def _price_from_sku(sku: str, kanri_id: str) -> str:
 
 _SUMMARY_HEADERS = [
     "SKU", "ステータス", "商品名", "写真", "商品ページ",
-    "販売価格", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格", "コンディション",
+    "販売価格", "カート獲得", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格", "コンディション",
     "ASIN", "アカウント",
     "FBA納品日", "出品日", "売却日",
     "仕入れ値", "仕入れ日",
@@ -1693,6 +1693,38 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                         break
     yield f"  → 出品価格取得: {len(listing_price_map)} 件"
 
+    # ── Step 4.6: カート獲得状況を一括取得（get_competitive_pricing_for_skus）──
+    # CompetitivePriceId=="1" かつ belongsToRequester==true → 自分がカートを取っている
+    buybox_map: dict[str, bool] = {}  # sku → カート獲得中か
+    if active_skus:
+        for i in range(0, len(active_skus), 20):
+            batch = active_skus[i : i + 20]
+            for attempt in range(4):
+                try:
+                    resp = products_api_price.get_competitive_pricing_for_skus(
+                        seller_sku_list=batch, MarketplaceId=_marketplace_id()
+                    )
+                    items = resp.payload if isinstance(resp.payload, list) else [resp.payload]
+                    for item in items:
+                        if item.get("status") != "Success":
+                            continue
+                        sku_val = item.get("SellerSKU", "")
+                        price_list = item.get("Product", {}).get("CompetitivePricing", {}).get("CompetitivePriceList", [])
+                        is_winning = any(
+                            p.get("CompetitivePriceId") == "1" and p.get("belongsToRequester") is True
+                            for p in price_list
+                        )
+                        buybox_map[sku_val] = is_winning
+                    time.sleep(2.5)
+                    break
+                except Exception as e:
+                    if "QuotaExceeded" in str(e) and attempt < 3:
+                        time.sleep(10 * (attempt + 1))
+                    else:
+                        yield f"  カート獲得状況取得エラー: {e}"
+                        break
+    yield f"  → カート獲得状況取得: {len(buybox_map)} 件（獲得中: {sum(1 for v in buybox_map.values() if v)} 件）"
+
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
     yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
     if not amazon_skus:
@@ -1828,6 +1860,8 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         else:
             hanbai = listing_price_map.get(sku, "") or _price_from_sku(sku, kanri_id)
 
+        buybox_status = "○" if buybox_map.get(sku) else ("✗" if sku in buybox_map else "")
+
         all_rows.append([
             sku,
             status,
@@ -1835,6 +1869,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             photo_formula,
             page_link,
             hanbai,
+            buybox_status,       # カート獲得（○/✗）
             cart_price_actual,   # カート価格（現在のカート獲得者の価格）
             cart_cond_str,       # カート状態
             cart_price_yoso,     # カート価格予想（同条件FBA最安値-10円）
