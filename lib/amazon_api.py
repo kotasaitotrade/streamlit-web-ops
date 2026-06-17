@@ -403,6 +403,8 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
     fba_min_price = None
     is_winning = False
     my_offer_exists = False
+    any_bb_winner = False  # 誰かがIsBuyBoxWinner=Trueを持つか
+    my_fba_price_in_cond = None  # 自社のFBA価格（同コンディション内）
 
     for offer in payload.get("Offers", []):
         try:
@@ -422,17 +424,20 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
         if is_bb:
             cart_price = price
             cart_cond  = label
+            any_bb_winner = True
 
         if my_offer:
             my_offer_exists = True
             if is_bb:
                 is_winning = True
+            if is_fba and sub == sub_condition.lower():
+                my_fba_price_in_cond = price
 
         if lowest_price is None or price < lowest_price:
             lowest_price = price
             lowest_cond  = label
 
-        if is_prime and sub == sub_condition.lower():
+        if (is_prime or is_fba) and sub == sub_condition.lower():
             fba_rival_count += 1
             if fba_min_price is None or price < fba_min_price:
                 fba_min_price = price
@@ -443,6 +448,13 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
         bb.get("condition", "").lower() in ("new", "新品")
         for bb in buy_box_prices
     )
+
+    # フォールバック判定: BuyBoxPricesが空かつ誰もIsBuyBoxWinner=Trueでない場合、
+    # 自社FBAが同コンディション最安値なら実質カート獲得とみなす
+    if (not is_winning and my_offer_exists and not any_bb_winner
+            and not buy_box_prices and my_fba_price_in_cond is not None
+            and my_fba_price_in_cond == fba_min_price):
+        is_winning = True
 
     # フォールバック: BuyBoxPrices から cart_price を補完（Used限定）
     if cart_price is None:
