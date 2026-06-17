@@ -609,6 +609,119 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
     yield f"完了: 更新 {updated} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
 
 
+def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str = None, management_spreadsheet_id=None):
+    """generator: サマリーシートのO列（最低販売価格）に入力された値をAmazon出品価格に反映する。
+
+    - A列(SKU) と O列(最低販売価格) を読む
+    - ステータスが販売中/納品中の行が対象（B列で判定）
+    - dry_run=True のときはログのみ（実際の変更なし）
+    - 変更後は G列（販売価格）も書き戻す
+    - management_spreadsheet_id が指定されていれば管理シートの J列も更新する
+    """
+    from sp_api.api import ListingsItems
+
+    if not summary_spreadsheet_id:
+        yield "エラー: summary_spreadsheet_id が未指定です"
+        return
+
+    yield "サマリーシート読み込み中..."
+    svc = _sheets_service()
+    result = svc.spreadsheets().values().get(
+        spreadsheetId=summary_spreadsheet_id,
+        range="商品一覧!A2:O4000",
+    ).execute()
+    rows = result.get("values", [])
+
+    targets = []
+    for i, row in enumerate(rows, start=2):  # 行番号（ヘッダーが1行目）
+        sku      = row[_SCOL_SKU].strip()    if len(row) > _SCOL_SKU    else ""
+        status   = row[_SCOL_STATUS].strip() if len(row) > _SCOL_STATUS else ""
+        min_str  = row[_SCOL_MIN_PRICE].strip() if len(row) > _SCOL_MIN_PRICE else ""
+        if not sku or not min_str or status not in ("販売中", "納品中"):
+            continue
+        try:
+            new_price = int(float(min_str.replace(",", "").replace("¥", "")))
+        except ValueError:
+            continue
+        hanbai_str = row[_SCOL_HANBAI].strip() if len(row) > _SCOL_HANBAI else ""
+        try:
+            current = int(float(hanbai_str.replace(",", ""))) if hanbai_str else None
+        except ValueError:
+            current = None
+        targets.append({
+            "summary_row": i,
+            "sku":         sku,
+            "current":     current,
+            "new_price":   new_price,
+        })
+
+    yield f"対象: {len(targets)} 件（販売中/納品中 かつ O列入力済み）"
+    if not targets:
+        yield "対象なし。O列（最低販売価格）に金額を入力してください。"
+        return
+
+    from sp_api.base import Marketplaces
+    listings_api = None if dry_run else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+
+    # SKU→管理シート行番号のマップ（管理シート更新用）
+    mgmt_sku_row: dict[str, int] = {}
+    if not dry_run and management_spreadsheet_id:
+        mgmt_rows = _read_rows("O", management_spreadsheet_id)
+        for sheet_row, row in mgmt_rows:
+            sku_val = _cell(row, COL_SKU)
+            if sku_val:
+                mgmt_sku_row[sku_val] = sheet_row
+
+    updated = skipped = failed = 0
+    for t in targets:
+        current_label = f"{t['current']:,}円" if t["current"] else "不明"
+        yield f"[{t['sku']}] 現在={current_label} → {t['new_price']:,}円"
+
+        if t["current"] == t["new_price"]:
+            yield f"  → 変更不要（すでに同じ価格）"
+            skipped += 1
+            continue
+
+        if dry_run:
+            yield f"  → [ドライラン] {current_label} → {t['new_price']:,}円"
+            updated += 1
+            continue
+
+        try:
+            listings_api.patch_listings_item(
+                sellerId=_seller_id(), sku=t["sku"],
+                marketplaceIds=[_marketplace_id()],
+                body={
+                    "productType": "PRODUCT",
+                    "patches": [{"op": "replace", "path": "/attributes/purchasable_offer",
+                                 "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["new_price"])}]}]}]}],
+                },
+            )
+            # サマリーシートの G列（販売価格）を更新
+            svc.spreadsheets().values().update(
+                spreadsheetId=summary_spreadsheet_id,
+                range=f"商品一覧!G{t['summary_row']}",
+                valueInputOption="RAW",
+                body={"values": [[str(t["new_price"])]]},
+            ).execute()
+            # 管理シートの J列（販売価格）も更新
+            if management_spreadsheet_id and t["sku"] in mgmt_sku_row:
+                svc.spreadsheets().values().update(
+                    spreadsheetId=management_spreadsheet_id,
+                    range=f"{SHEET_NAME}!J{mgmt_sku_row[t['sku']]}",
+                    valueInputOption="RAW",
+                    body={"values": [[str(t["new_price"])]]},
+                ).execute()
+            yield f"  → 更新完了: {current_label} → {t['new_price']:,}円"
+            updated += 1
+        except Exception as e:
+            yield f"  → エラー: {e}"
+            failed += 1
+        time.sleep(1)
+
+    yield f"完了: 更新 {updated} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+
+
 def run_set_price_from_min(dry_run: bool = True, spreadsheet_id=None):
     """generator: AE列（最低販売価格）に入力された値をそのままAmazon出品価格に設定する。
 
@@ -1604,13 +1717,24 @@ def _price_from_sku(sku: str, kanri_id: str) -> str:
         return ""
     return suffix[:-6]             # 末尾6桁（YYMMDD）を除いた残りが価格
 
+# 商品一覧シートの列順（スプレッドシート側の列順と一致させること）
+# A       B         C     D   E        F          G      H        I       J         K       L         M           N          O
+# SKU ステータス 商品名 写真 商品ページ コンディション 販売価格 カート獲得 カート価格 カート状態 カート価格予想 最低価格 最低価格状態 FBAライバル数 最低販売価格
+# P    Q       R       S    T    U     V
+# ASIN アカウント FBA納品日 出品日 売却日 仕入れ値 仕入れ日
 _SUMMARY_HEADERS = [
     "SKU", "ステータス", "商品名", "写真", "商品ページ",
-    "販売価格", "カート獲得", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格", "コンディション",
+    "コンディション", "販売価格", "カート獲得", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格",
     "ASIN", "アカウント",
     "FBA納品日", "出品日", "売却日",
     "仕入れ値", "仕入れ日",
 ]
+# 列インデックス（0始まり）
+_SCOL_SKU        = 0   # A
+_SCOL_STATUS     = 1   # B
+_SCOL_COND       = 5   # F
+_SCOL_HANBAI     = 6   # G
+_SCOL_MIN_PRICE  = 14  # O: 最低販売価格（ユーザーが手動入力する下限価格）
 
 
 def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
@@ -1969,28 +2093,28 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             hanbai = listing_price_map.get(sku, "") or _price_from_sku(sku, kanri_id)
 
         all_rows.append([
-            sku,
-            status,
-            product_name,
-            photo_formula,
-            page_link,
-            hanbai,
-            buybox_status,       # カート獲得（○/✗）
-            cart_price_actual,   # カート価格（現在のカート獲得者の価格）
-            cart_cond_str,       # カート状態
-            cart_price_yoso,     # カート価格予想（同条件FBA最安値-10円）
-            lowest_price_str,    # 最低価格（全出品者の中の最安値）
-            lowest_cond_str,     # 最低価格状態
-            rival_count,
-            master.get("min_price", ""),
-            cond_label,
-            asin,
-            master.get("account", ""),
-            fba_date,
-            listing_date,
-            sold_date,
-            master.get("shiire", ""),
-            master.get("shiire_date", ""),
+            sku,                          # A: SKU
+            status,                       # B: ステータス
+            product_name,                 # C: 商品名
+            photo_formula,                # D: 写真
+            page_link,                    # E: 商品ページ
+            cond_label,                   # F: コンディション
+            hanbai,                       # G: 販売価格
+            buybox_status,                # H: カート獲得（○/△/✗）
+            cart_price_actual,            # I: カート価格
+            cart_cond_str,                # J: カート状態
+            cart_price_yoso,              # K: カート価格予想
+            lowest_price_str,             # L: 最低価格
+            lowest_cond_str,              # M: 最低価格状態
+            rival_count,                  # N: FBAライバル数
+            master.get("min_price", ""),  # O: 最低販売価格
+            asin,                         # P: ASIN
+            master.get("account", ""),    # Q: アカウント
+            fba_date,                     # R: FBA納品日
+            listing_date,                 # S: 出品日
+            sold_date,                    # T: 売却日
+            master.get("shiire", ""),     # U: 仕入れ値
+            master.get("shiire_date", ""),# V: 仕入れ日
         ])
 
     yield f"合計 {len(all_rows)} 件集計完了"
