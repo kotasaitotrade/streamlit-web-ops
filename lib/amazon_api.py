@@ -247,7 +247,7 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("P", spreadsheet_id)
+    all_rows = _read_rows("Q", spreadsheet_id)
 
     targets = []
     for sheet_row, row in all_rows:

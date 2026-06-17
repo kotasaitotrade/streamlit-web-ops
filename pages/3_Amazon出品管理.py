@@ -132,19 +132,22 @@ with tab1:
 **ASIN列が空** で **仕入れ特記事項に型番・商品名が入っている行** を対象に、
 Amazon カタログを検索して ASIN を自動書き込みします。
 """)
-    run_asin = st.button("▶ 実行する", key="run_asin", type="primary")
+    if st.button("▶ 実行する", key="run_asin", type="primary"):
+        st.session_state["asin_confirm_needed"] = True
 
-    if run_asin:
+    if st.session_state.get("asin_confirm_needed"):
         st.warning("⚠️ スプレッドシートの ASIN 列を上書きします。よろしいですか？")
         c_ok, c_cancel = st.columns([1, 4])
-        confirmed_asin = c_ok.button("✅ 実行する", key="run_asin_confirm", type="primary")
-        c_cancel.button("キャンセル", key="run_asin_cancel")
-        if confirmed_asin:
+        if c_ok.button("✅ 実行する", key="run_asin_confirm", type="primary"):
+            st.session_state["asin_confirm_needed"] = False
             log_area = st.empty()
             with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
                 lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
             st.success("✅ 完了しました")
             _get_status_counts.clear()
+        if c_cancel.button("キャンセル", key="run_asin_cancel"):
+            st.session_state["asin_confirm_needed"] = False
+            st.rerun()
 
 
 
