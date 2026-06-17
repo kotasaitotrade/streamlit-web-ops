@@ -38,6 +38,15 @@ status_color = {
 }
 df["状態"] = df["status"].map(lambda s: f"{status_color.get(s, '⚪')} {s}")
 
+# 日時を読みやすい形式（YYYY-MM-DD HH:MM）に整形
+for col in ["requested_at", "started_at", "finished_at"]:
+    if col in df.columns:
+        df[col] = (
+            pd.to_datetime(df[col], errors="coerce")
+            .dt.strftime("%Y-%m-%d %H:%M")
+            .fillna("")
+        )
+
 display_cols = [c for c in ["状態", "tool_name", "requested_at", "started_at", "finished_at", "log_url", "error", "user_email"] if c in df.columns]
 if not show_all:
     display_cols = [c for c in display_cols if c != "user_email"]
@@ -47,6 +56,12 @@ st.dataframe(
     hide_index=True,
     use_container_width=True,
     column_config={
-        "log_url": st.column_config.LinkColumn("ログ"),
+        "tool_name":   st.column_config.TextColumn("ツール"),
+        "requested_at": st.column_config.TextColumn("受付日時"),
+        "started_at":  st.column_config.TextColumn("開始日時"),
+        "finished_at": st.column_config.TextColumn("完了日時"),
+        "error":       st.column_config.TextColumn("エラー"),
+        "user_email":  st.column_config.TextColumn("ユーザー"),
+        "log_url":     st.column_config.LinkColumn("ログ"),
     },
 )
