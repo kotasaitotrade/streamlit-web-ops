@@ -369,12 +369,13 @@ def _analyze_fba_offers(payload: dict | None, sub_condition: str) -> tuple[int |
 
 
 def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
-    """get_item_offers のペイロードから詳細情報を抽出する。
-    Returns: (cart_price, cart_cond, lowest_price, lowest_cond, fba_rival_count, fba_min_price)
+    """get_listings_offer のペイロードから詳細情報を抽出する。
+    Returns: (cart_price, cart_cond, lowest_price, lowest_cond, fba_rival_count, fba_min_price, is_winning)
       - cart_price/cart_cond: 現在のカート獲得者の価格と状態
       - lowest_price/lowest_cond: 全出品者の中で最安値の価格と状態
       - fba_rival_count: 同コンディション・FBA の競合数
       - fba_min_price: 同コンディション FBA の最安値（カート価格予想算出用）
+      - is_winning: 自分がカートを取っているか（MyOffer=true かつ IsBuyBoxWinner=true）
     """
     _SUBCOND_JA = {
         "new": "新品", "mint": "ほぼ新品",
@@ -382,12 +383,13 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
     }
 
     if not payload:
-        return None, "", None, "", 0, None
+        return None, "", None, "", 0, None, False
 
     cart_price = cart_cond = None
     lowest_price = lowest_cond = None
     fba_rival_count = 0
     fba_min_price = None
+    is_winning = False
 
     for offer in payload.get("Offers", []):
         try:
@@ -395,17 +397,21 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
         except Exception:
             continue
 
-        sub  = offer.get("SubCondition", "").lower()
-        is_fba  = offer.get("IsFulfilledByAmazon", False)
+        sub      = offer.get("SubCondition", "").lower()
+        is_fba   = offer.get("IsFulfilledByAmazon", False)
         is_prime = offer.get("PrimeInformation", {}).get("IsPrime", False)
-        is_bb   = offer.get("IsBuyBoxWinner", False)
-        cond_ja = _SUBCOND_JA.get(sub, sub or "不明")
-        channel = "Amazon" if is_fba else "出品者"
-        label   = f"{cond_ja}({channel})"
+        is_bb    = offer.get("IsBuyBoxWinner", False)
+        my_offer = offer.get("MyOffer", False)
+        cond_ja  = _SUBCOND_JA.get(sub, sub or "不明")
+        channel  = "Amazon" if is_fba else "出品者"
+        label    = f"{cond_ja}({channel})"
 
         if is_bb:
             cart_price = price
             cart_cond  = label
+
+        if my_offer and is_bb:
+            is_winning = True
 
         if lowest_price is None or price < lowest_price:
             lowest_price = price
@@ -436,7 +442,7 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
             except Exception:
                 pass
 
-    return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price
+    return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price, is_winning
 
 
 def _batch_write_reprice(sheet_row: int, cart_price: int | None, rival_count: int,
@@ -1693,45 +1699,13 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                         break
     yield f"  → 出品価格取得: {len(listing_price_map)} 件"
 
-    # ── Step 4.6: カート獲得状況を一括取得（get_competitive_pricing_for_skus）──
-    # CompetitivePriceId=="1" かつ belongsToRequester==true → 自分がカートを取っている
-    buybox_map: dict[str, bool] = {}  # sku → カート獲得中か
-    if active_skus:
-        for i in range(0, len(active_skus), 20):
-            batch = active_skus[i : i + 20]
-            for attempt in range(4):
-                try:
-                    resp = products_api_price.get_competitive_pricing_for_skus(
-                        seller_sku_list=batch, MarketplaceId=_marketplace_id()
-                    )
-                    items = resp.payload if isinstance(resp.payload, list) else [resp.payload]
-                    for item in items:
-                        if item.get("status") != "Success":
-                            continue
-                        sku_val = item.get("SellerSKU", "")
-                        price_list = item.get("Product", {}).get("CompetitivePricing", {}).get("CompetitivePriceList", [])
-                        is_winning = any(
-                            p.get("CompetitivePriceId") == "1" and p.get("belongsToRequester") is True
-                            for p in price_list
-                        )
-                        buybox_map[sku_val] = is_winning
-                    time.sleep(2.5)
-                    break
-                except Exception as e:
-                    if "QuotaExceeded" in str(e) and attempt < 3:
-                        time.sleep(10 * (attempt + 1))
-                    else:
-                        yield f"  カート獲得状況取得エラー: {e}"
-                        break
-    yield f"  → カート獲得状況取得: {len(buybox_map)} 件（獲得中: {sum(1 for v in buybox_map.values() if v)} 件）"
-
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
     yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
     if not amazon_skus:
         yield "⚠️ Amazon APIから商品が0件でした。認証エラーか在庫・注文が存在しない可能性があります。"
     products_api = Products(credentials=creds, marketplace=Marketplaces.JP)
     cat_api      = CatalogItems(credentials=creds, marketplace=Marketplaces.JP)
-    offers_cache: dict[str, dict | None] = {}  # asin → payload
+    offers_cache: dict[str, dict | None] = {}  # sku → payload（get_listings_offer はSKU単位）
     image_cache:  dict[str, str]         = {}  # asin → image URL
     all_rows = []
 
@@ -1794,12 +1768,16 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         cart_price_actual = cart_cond_str = ""
         cart_price_yoso   = rival_count   = ""
         lowest_price_str  = lowest_cond_str = ""
-        if status in ("販売中", "納品中", "在庫切れ") and asin:
-            if asin not in offers_cache:
+        buybox_status = ""
+        if status in ("販売中", "納品中", "在庫切れ") and sku:
+            if sku not in offers_cache:
                 payload = None
                 for attempt in range(3):
                     try:
-                        resp = products_api.get_item_offers(asin=asin, item_condition="Used")
+                        # get_listings_offer はSKU単位で呼び出し。MyOffer=true で自社出品を識別できる
+                        resp = products_api.get_listings_offer(
+                            seller_sku=sku, item_condition="Used", MarketplaceId=_marketplace_id()
+                        )
                         payload = resp.payload
                         break
                     except Exception as e:
@@ -1807,10 +1785,10 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                             time.sleep(6 * (attempt + 1))  # 6s, 12s
                         else:
                             break
-                offers_cache[asin] = payload
+                offers_cache[sku] = payload
                 time.sleep(2.5)  # SP-API pricing: 0.5 req/s 上限
-            c_price, c_cond, low_p, low_cond, rival_cnt, fba_min = _extract_offer_details(
-                offers_cache.get(asin), sub_cond
+            c_price, c_cond, low_p, low_cond, rival_cnt, fba_min, winning = _extract_offer_details(
+                offers_cache.get(sku), sub_cond
             )
             if c_price is not None:
                 cart_price_actual = str(c_price)
@@ -1821,6 +1799,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             rival_count = str(rival_cnt)
             if fba_min is not None:
                 cart_price_yoso = str(fba_min - 10)
+            buybox_status = "○" if winning else "✗"
 
         # Amazon商品画像（CatalogItems API）
         photo_formula = ""
@@ -1859,8 +1838,6 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             hanbai = sold.get("price", "") or _price_from_sku(sku, kanri_id)
         else:
             hanbai = listing_price_map.get(sku, "") or _price_from_sku(sku, kanri_id)
-
-        buybox_status = "○" if buybox_map.get(sku) else ("✗" if sku in buybox_map else "")
 
         all_rows.append([
             sku,
