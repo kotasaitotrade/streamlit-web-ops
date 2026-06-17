@@ -99,7 +99,7 @@ if len(raw) < 2:
 # 販売中のみ抽出
 items = []
 for sheet_row_idx, row in enumerate(raw[1:], start=2):
-    if _cell(row, _COL_STATUS) != "販売中":
+    if _cell(row, _COL_STATUS) not in ("販売中", "納品中"):
         continue
     sku      = _cell(row, _COL_SKU)
     asin     = _cell(row, _COL_ASIN)
@@ -123,7 +123,7 @@ if not items:
     st.info("販売中の商品がありません。")
     st.stop()
 
-st.caption(f"販売中: {len(items)} 件 | [スプレッドシートで開く]({SUMMARY_SS_URL})")
+st.caption(f"販売中・納品中: {len(items)} 件 | [スプレッドシートで開く]({SUMMARY_SS_URL})")
 st.divider()
 
 # ============================================================
