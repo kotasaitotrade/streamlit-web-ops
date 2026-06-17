@@ -646,7 +646,7 @@ def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str
     svc = _sheets_service()
     result = svc.spreadsheets().values().get(
         spreadsheetId=summary_spreadsheet_id,
-        range="商品一覧!A2:O4000",
+        range="商品一覧!A2:P4000",
     ).execute()
     rows = result.get("values", [])
 
@@ -654,7 +654,7 @@ def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str
     for i, row in enumerate(rows, start=2):  # 行番号（ヘッダーが1行目）
         sku      = row[_SCOL_SKU].strip()    if len(row) > _SCOL_SKU    else ""
         status   = row[_SCOL_STATUS].strip() if len(row) > _SCOL_STATUS else ""
-        min_str  = row[_SCOL_MIN_PRICE].strip() if len(row) > _SCOL_MIN_PRICE else ""
+        min_str  = row[_SCOL_CHANGE_PRICE].strip() if len(row) > _SCOL_CHANGE_PRICE else ""
         if not sku or not min_str or status not in ("販売中", "納品中"):
             continue
         try:
@@ -715,7 +715,7 @@ def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str
                                  "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["new_price"])}]}]}]}],
                 },
             )
-            # サマリーシートの G列（販売価格）を更新
+            # サマリーシートの G列（販売価格）を更新（G = index 6 = 販売価格）
             svc.spreadsheets().values().update(
                 spreadsheetId=summary_spreadsheet_id,
                 range=f"商品一覧!G{t['summary_row']}",
@@ -1735,24 +1735,26 @@ def _price_from_sku(sku: str, kanri_id: str) -> str:
         return ""
     return suffix[:-6]             # 末尾6桁（YYMMDD）を除いた残りが価格
 
-# 商品一覧シートの列順（スプレッドシート側の列順と一致させること）
-# A       B         C     D   E        F          G      H        I       J         K       L         M           N          O
-# SKU ステータス 商品名 写真 商品ページ コンディション 販売価格 カート獲得 カート価格 カート状態 カート価格予想 最低価格 最低価格状態 FBAライバル数 最低販売価格
-# P    Q       R       S    T    U     V
-# ASIN アカウント FBA納品日 出品日 売却日 仕入れ値 仕入れ日
+# 商品一覧シートの列順（スプレッドシート側の列順と一致させること・列順変更禁止）
+# A       B         C     D   E        F          G      H        I       J
+# SKU ステータス 商品名 写真 商品ページ コンディション 販売価格 カート獲得 カート価格 カート状態
+# K            L     M           N          O              P      Q    R       S    T    U     V    W
+# カート価格予想 最低価格 最低価格状態 FBAライバル数 同コンFBA最低金額 変更金額 ASIN アカウント FBA納品日 出品日 売却日 仕入れ値 仕入れ日
 _SUMMARY_HEADERS = [
     "SKU", "ステータス", "商品名", "写真", "商品ページ",
-    "コンディション", "販売価格", "カート獲得", "カート価格", "カート状態", "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "最低販売価格",
+    "コンディション", "販売価格", "カート獲得", "カート価格", "カート状態",
+    "カート価格予想", "最低価格", "最低価格状態", "FBAライバル数", "同コンFBA最低金額", "変更金額",
     "ASIN", "アカウント",
     "FBA納品日", "出品日", "売却日",
     "仕入れ値", "仕入れ日",
 ]
 # 列インデックス（0始まり）
-_SCOL_SKU        = 0   # A
-_SCOL_STATUS     = 1   # B
-_SCOL_COND       = 5   # F
-_SCOL_HANBAI     = 6   # G
-_SCOL_MIN_PRICE  = 14  # O: 最低販売価格（ユーザーが手動入力する下限価格）
+_SCOL_SKU          = 0   # A
+_SCOL_STATUS       = 1   # B
+_SCOL_COND         = 5   # F
+_SCOL_HANBAI       = 6   # G
+_SCOL_FBA_MIN      = 14  # O: 同コンFBA最低金額（同コンディション・FBA最安値）
+_SCOL_CHANGE_PRICE = 15  # P: 変更金額（ユーザーが設定する変更後価格）
 
 
 def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
@@ -2029,6 +2031,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         cart_price_actual = cart_cond_str = ""
         cart_price_yoso   = rival_count   = ""
         lowest_price_str  = lowest_cond_str = ""
+        fba_min_str   = ""
         buybox_status = ""
         if status in ("販売中", "納品中", "在庫切れ") and sku:
             if sku not in offers_cache:
@@ -2060,6 +2063,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             rival_count = str(rival_cnt)
             if fba_min is not None:
                 cart_price_yoso = str(fba_min - 10)
+                fba_min_str = str(fba_min)
             # ○: 自分がカート獲得
             # △: 新品がメインカートで自分は中古として出品中
             # ✗: カート未獲得
@@ -2125,14 +2129,15 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             lowest_price_str,             # L: 最低価格
             lowest_cond_str,              # M: 最低価格状態
             rival_count,                  # N: FBAライバル数
-            master.get("min_price", ""),  # O: 最低販売価格
-            asin,                         # P: ASIN
-            master.get("account", ""),    # Q: アカウント
-            fba_date,                     # R: FBA納品日
-            listing_date,                 # S: 出品日
-            sold_date,                    # T: 売却日
-            master.get("shiire", ""),     # U: 仕入れ値
-            master.get("shiire_date", ""),# V: 仕入れ日
+            fba_min_str,                  # O: 同コンFBA最低金額
+            master.get("min_price", ""),  # P: 変更金額（ユーザー手動入力）
+            asin,                         # Q: ASIN
+            master.get("account", ""),    # R: アカウント
+            fba_date,                     # S: FBA納品日
+            listing_date,                 # T: 出品日
+            sold_date,                    # U: 売却日
+            master.get("shiire", ""),     # V: 仕入れ値
+            master.get("shiire_date", ""),# W: 仕入れ日
         ])
 
     yield f"合計 {len(all_rows)} 件集計完了"
