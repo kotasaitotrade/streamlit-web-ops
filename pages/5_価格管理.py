@@ -1,8 +1,7 @@
-"""スマホ対応の価格管理ページ。
-販売中商品の一覧を表示し、変更金額を入力してAmazonに反映できる。"""
+"""スマホ対応の価格管理ページ（カード形式）。
+販売中・納品中商品をカード表示し、変更金額を入力してAmazonに反映する。"""
 
 import streamlit as st
-import pandas as pd
 
 from lib.sheets import materialize_secrets
 from lib.auth import require_login, logout_button
@@ -18,34 +17,37 @@ import lib.amazon_api as amazon
 # ============================================================
 # 定数
 # ============================================================
-SUMMARY_SS_ID    = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
-MGMT_SS_ID       = "1Xb66vv997dWX9CIofuPNY23tuIQwoNFmm-hNBLbnBYo"  # satoアカウント
-SUMMARY_SS_URL   = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit"
+SUMMARY_SS_ID  = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
+SUMMARY_SS_URL = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit"
 
-# 商品一覧シートの列インデックス（amazon_api._SCOL_* と同じ値）
-_COL_SKU    = 0   # A
-_COL_STATUS = 1   # B
-_COL_NAME   = 2   # C
-_COL_COND   = 5   # F
-_COL_PRICE  = 6   # G: 販売価格
-_COL_CART   = 7   # H: カート獲得
-_COL_CPRICE = 8   # I: カート価格
-_COL_CCOND  = 9   # J: カート状態
-_COL_FMIN   = 14  # O: 同コンFBA最低金額
-_COL_CHANGE = 15  # P: 変更金額
-_COL_ASIN   = 16  # Q: ASIN
+_COL_SKU    = 0
+_COL_STATUS = 1
+_COL_NAME   = 2
+_COL_COND   = 5
+_COL_PRICE  = 6
+_COL_CART   = 7
+_COL_CPRICE = 8
+_COL_CCOND  = 9
+_COL_FMIN   = 14
+_COL_CHANGE = 15
+_COL_ASIN   = 16
 
 # ============================================================
-# スタイル
+# スタイル（スマホ向け）
 # ============================================================
 st.markdown("""
 <style>
-    /* モバイル向け余白調整 */
-    .block-container { padding: 1rem 0.75rem; }
-    /* カート獲得バッジ */
-    .badge-o  { color: #1e7e34; font-weight: bold; font-size: 1.1em; }
-    .badge-x  { color: #999;    font-size: 1.0em; }
-    .badge-d  { color: #856404; font-weight: bold; font-size: 1.1em; }
+    .block-container { padding: 0.75rem 0.75rem 2rem; }
+    /* カード風のexpander */
+    details[data-testid="stExpander"] {
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        margin-bottom: 6px;
+        background: #fff;
+    }
+    summary[data-testid="stExpanderToggleIcon"] { font-size: 15px; }
+    /* 入力欄の幅を広げる */
+    input[type="number"] { font-size: 16px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,6 +73,15 @@ def _cell(row, idx, default=""):
         return default
     return str(val).strip()
 
+def _fmt_price(val: str) -> str:
+    try:
+        return f"¥{int(float(val)):,}"
+    except Exception:
+        return "-"
+
+# ============================================================
+# 更新ボタン
+# ============================================================
 if st.button("🔄 Amazonから最新データを取得", key="reload"):
     log_area = st.empty()
     lines = []
@@ -80,7 +91,7 @@ if st.button("🔄 Amazonから最新データを取得", key="reload"):
             log_area.markdown(
                 '<div style="background:#1e1e1e;color:#d4d4d4;font-family:monospace;'
                 'font-size:11px;padding:8px;border-radius:6px;white-space:pre-wrap;'
-                f'max-height:200px;overflow-y:auto">' + "\n".join(lines[-40:]) + "</div>",
+                f'max-height:180px;overflow-y:auto">' + "\n".join(lines[-30:]) + "</div>",
                 unsafe_allow_html=True,
             )
         log_area.success("✅ 取得完了")
@@ -89,110 +100,120 @@ if st.button("🔄 Amazonから最新データを取得", key="reload"):
     load_summary.clear()
     st.rerun()
 
-with st.spinner("スプレッドシートからデータを読み込み中..."):
+with st.spinner("読み込み中..."):
     raw = load_summary()
 
 if len(raw) < 2:
-    st.warning("データがありません。「Amazonから最新データを取得」ボタンを押してください。")
+    st.warning("データがありません。「Amazonから最新データを取得」を押してください。")
     st.stop()
 
-# 販売中のみ抽出
+# 販売中・納品中のみ抽出
 items = []
 for sheet_row_idx, row in enumerate(raw[1:], start=2):
-    if _cell(row, _COL_STATUS) not in ("販売中", "納品中"):
+    status = _cell(row, _COL_STATUS)
+    if status not in ("販売中", "納品中"):
         continue
-    sku      = _cell(row, _COL_SKU)
-    asin     = _cell(row, _COL_ASIN)
-    page_url = f"https://www.amazon.co.jp/dp/{asin}" if asin else ""
+    sku  = _cell(row, _COL_SKU)
+    asin = _cell(row, _COL_ASIN)
     items.append({
-        "sheet_row":    sheet_row_idx,
-        "sku":          sku,
-        "管理ID":       amazon._kanri_id_from_sku(sku) if sku else "",
-        "商品名":       _cell(row, _COL_NAME),
-        "URL":          page_url,
+        "sheet_row": sheet_row_idx,
+        "sku":       sku,
+        "管理ID":    amazon._kanri_id_from_sku(sku) if sku else "",
+        "商品名":    _cell(row, _COL_NAME),
+        "URL":       f"https://www.amazon.co.jp/dp/{asin}" if asin else "",
+        "状態":      status,
         "コンディション": _cell(row, _COL_COND),
-        "販売価格":     _cell(row, _COL_PRICE),
-        "カート獲得":   _cell(row, _COL_CART),
-        "カート価格":   _cell(row, _COL_CPRICE),
-        "カート状態":   _cell(row, _COL_CCOND),
-        "同コンFBA最低金額": _cell(row, _COL_FMIN),
-        "変更金額":     _cell(row, _COL_CHANGE),
+        "販売価格":  _cell(row, _COL_PRICE),
+        "カート獲得": _cell(row, _COL_CART),
+        "カート価格": _cell(row, _COL_CPRICE),
+        "カート状態": _cell(row, _COL_CCOND),
+        "同コンFBA最低": _cell(row, _COL_FMIN),
+        "変更金額_default": _cell(row, _COL_CHANGE),
     })
 
 if not items:
-    st.info("販売中の商品がありません。")
+    st.info("販売中・納品中の商品がありません。")
     st.stop()
 
-st.caption(f"販売中・納品中: {len(items)} 件 | [スプレッドシートで開く]({SUMMARY_SS_URL})")
+st.caption(f"販売中・納品中: {len(items)} 件 | [スプレッドシート]({SUMMARY_SS_URL})")
+
+# ============================================================
+# カード一覧
+# ============================================================
+for i, item in enumerate(items):
+    cart = item["カート獲得"]
+    cart_icon = "🛒 " if cart == "○" else ("△ " if cart == "△" else "")
+    status_badge = "🟡 " if item["状態"] == "納品中" else ""
+    price_str = _fmt_price(item["販売価格"])
+    cond_str  = item["コンディション"] or item["状態"]
+
+    header = f"{status_badge}{cart_icon}{item['商品名'][:22]}  　{cond_str}  　{price_str}"
+
+    with st.expander(header, expanded=False):
+        # 詳細情報
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown(f"**管理ID** : {item['管理ID']}")
+            st.markdown(f"**状態** : {item['状態']}")
+            st.markdown(f"**カート** : {cart or '－'}")
+            st.markdown(f"**カート価格** : {_fmt_price(item['カート価格'])}")
+        with col_r:
+            st.markdown(f"**カート状態** : {item['カート状態'] or '－'}")
+            fmin = item["同コンFBA最低"]
+            st.markdown(f"**同コンFBA最低** : {_fmt_price(fmin) if fmin else '－'}")
+            if item["URL"]:
+                st.link_button("🔗 商品ページを開く", item["URL"], use_container_width=True)
+
+        # 変更金額入力
+        default_val = None
+        try:
+            default_val = int(float(item["変更金額_default"])) if item["変更金額_default"] else None
+        except Exception:
+            pass
+
+        st.number_input(
+            "💰 変更金額（円）",
+            min_value=1,
+            value=default_val,
+            step=100,
+            placeholder="変更しない場合は空欄のまま",
+            key=f"price_{i}",
+            label_visibility="visible",
+        )
+
 st.divider()
 
 # ============================================================
-# data_editor で表示・編集
+# 反映ボタン
 # ============================================================
-df = pd.DataFrame(items)
-
-# 数値列を変換（NaN=空セル表示。Int64だと"None"テキストになるのでfloatを使う）
-for col in ["販売価格", "カート価格", "同コンFBA最低金額", "変更金額"]:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
-
-edited = st.data_editor(
-    df[[
-        "管理ID", "URL", "商品名", "コンディション",
-        "販売価格", "カート獲得", "カート価格", "カート状態",
-        "同コンFBA最低金額", "変更金額",
-    ]],
-    column_config={
-        "管理ID":           st.column_config.TextColumn("管理ID",           disabled=True, width="small"),
-        "URL":              st.column_config.LinkColumn("商品ページ",        disabled=True, display_text="開く", width="small"),
-        "商品名":           st.column_config.TextColumn("商品名",           disabled=True, width="medium"),
-        "コンディション":   st.column_config.TextColumn("状態",             disabled=True, width="small"),
-        "販売価格":         st.column_config.NumberColumn("販売価格",        disabled=True, format="¥%d"),
-        "カート獲得":       st.column_config.TextColumn("カート",           disabled=True, width="small"),
-        "カート価格":       st.column_config.NumberColumn("カート価格",      disabled=True, format="¥%d"),
-        "カート状態":       st.column_config.TextColumn("カート状態",        disabled=True, width="small"),
-        "同コンFBA最低金額": st.column_config.NumberColumn("同コンFBA最低", disabled=True, format="¥%d"),
-        "変更金額":         st.column_config.NumberColumn("変更金額 ✏️",     format="¥%d",  min_value=1),
-    },
-    hide_index=True,
-    use_container_width=True,
-    key="price_editor",
-)
-
-st.divider()
-
-# ============================================================
-# 変更金額をAmazonに反映
-# ============================================================
-c1, c2 = st.columns([1, 3])
+c1, c2 = st.columns([1, 2])
 dry_run = c1.checkbox("ドライラン", value=True, key="dry_price")
 apply_btn = c2.button(
     "▶ ドライラン確認" if dry_run else "▶ Amazonに反映",
     type="secondary" if dry_run else "primary",
     key="apply_price",
+    use_container_width=True,
 )
 if not dry_run:
     st.warning("⚠️ 本番モード: Amazonの出品価格を実際に変更します。")
 
 if apply_btn:
-    # editedのindex と df のindexを照合して変更金額を取得
     changes = []
-    for i, row_edit in edited.iterrows():
-        new_val = row_edit["変更金額"]
-        if pd.isna(new_val) or new_val == 0:
+    for i, item in enumerate(items):
+        new_val = st.session_state.get(f"price_{i}")
+        if not new_val:
             continue
-        orig = items[i]
         changes.append({
-            "sku":         orig["sku"],
-            "kanri_id":    orig["管理ID"],
-            "sheet_row":   orig["sheet_row"],
-            "current":     int(float(orig["販売価格"])) if orig["販売価格"] not in ("", None) else None,
-            "new_price":   int(new_val),
+            "sku":       item["sku"],
+            "kanri_id":  item["管理ID"],
+            "sheet_row": item["sheet_row"],
+            "current":   int(float(item["販売価格"])) if item["販売価格"] else None,
+            "new_price": int(new_val),
         })
 
     if not changes:
-        st.warning("変更金額が入力されている行がありません。")
+        st.warning("変更金額が入力されている商品がありません。")
     else:
-        # 変更金額をサマリーシートP列に書き込んでから run_set_price_from_summary を呼ぶ
         st.write(f"対象: {len(changes)} 件")
         log_area = st.empty()
         lines = []
@@ -207,7 +228,6 @@ if apply_btn:
             )
 
         if not dry_run:
-            # P列に変更金額を書き込む
             svc = amazon._sheets_service()
             for ch in changes:
                 svc.spreadsheets().values().update(
@@ -218,17 +238,18 @@ if apply_btn:
                 ).execute()
             _log(f"P列（変更金額）を {len(changes)} 件書き込みました")
 
-        # Amazon反映
+        from sp_api.api import ListingsItems
+        from sp_api.base import Marketplaces as MK
+        li = None if dry_run else ListingsItems(credentials=amazon._sp_creds(), marketplace=MK.JP)
+
+        import time
         for ch in changes:
-            cur_label = f"{ch['current']:,}円" if ch["current"] else "不明"
-            _log(f"[{ch['kanri_id']}] {cur_label} → {ch['new_price']:,}円")
+            cur = f"{ch['current']:,}円" if ch["current"] else "不明"
+            _log(f"[{ch['kanri_id']}] {cur} → {ch['new_price']:,}円")
             if dry_run:
-                _log(f"  → [ドライラン] スキップ")
+                _log("  → [ドライラン] スキップ")
                 continue
             try:
-                from sp_api.api import ListingsItems
-                from sp_api.base import Marketplaces as MK
-                li = ListingsItems(credentials=amazon._sp_creds(), marketplace=MK.JP)
                 li.patch_listings_item(
                     sellerId=amazon._seller_id(), sku=ch["sku"],
                     marketplaceIds=[amazon._marketplace_id()],
@@ -238,15 +259,14 @@ if apply_btn:
                                      "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(ch["new_price"])}]}]}]}],
                     },
                 )
-                # サマリーG列（販売価格）更新
                 svc.spreadsheets().values().update(
                     spreadsheetId=SUMMARY_SS_ID,
                     range=f"商品一覧!G{ch['sheet_row']}",
                     valueInputOption="RAW",
                     body={"values": [[str(ch["new_price"])]]},
                 ).execute()
-                _log(f"  → 更新完了")
-                import time; time.sleep(1)
+                _log("  → 更新完了")
+                time.sleep(1)
             except Exception as e:
                 _log(f"  → エラー: {e}")
 
