@@ -155,6 +155,8 @@ for i, item in enumerate(items):
     header = f"{status_badge}{cart_icon}{item['商品名'][:22]}  　{cond_str}  　{price_str}"
 
     with st.expander(header, expanded=False):
+        # フル商品名（ヘッダーは22文字で切れるため、展開時に全文を表示）
+        st.markdown(f"**{item['商品名']}**")
         # 詳細情報
         col_l, col_r = st.columns(2)
         with col_l:
