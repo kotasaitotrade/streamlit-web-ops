@@ -188,6 +188,40 @@ with tab3:
         if not dry3:
             _get_status_counts.clear()
 
+    st.divider()
+    st.subheader("💰 最低販売価格をそのまま反映")
+    st.markdown("""
+AE列（最低販売価格）に入力されている価格をそのまま Amazon 出品価格に設定します。
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | `3.出品済み` かつ AE列に値が入っている商品 |
+| 設定価格 | AE列の値をそのまま出品価格に適用 |
+| スプシ更新 | J列（販売価格）も同時に書き戻す |
+""")
+    c4, c5 = st.columns([1, 3])
+    with c4:
+        dry_min = st.checkbox("ドライラン", value=True, key="dry_min")
+    run_set_min = c5.button(
+        "▶ ドライラン実行" if dry_min else "▶ 本番実行",
+        key="run_set_min",
+        type="secondary" if dry_min else "primary",
+    )
+    if not dry_min:
+        st.warning("⚠️ 本番モード: SP-API に実際に価格変更リクエストを送信します。")
+
+    if run_set_min:
+        log_area2 = st.empty()
+        label2 = "ドライラン" if dry_min else "本番"
+        with st.spinner(f"価格反映中 [{label2}]... (1件あたり約1秒)"):
+            _stream_logs(
+                amazon.run_set_price_from_min(dry_run=dry_min, spreadsheet_id=ss_id),
+                log_area2,
+            )
+        st.success("✅ 完了しました")
+        if not dry_min:
+            _get_status_counts.clear()
+
 
 # ── タブ4: FNSKUラベル ───────────────────────────────────────
 with tab4:

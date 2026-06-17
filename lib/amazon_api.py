@@ -137,19 +137,31 @@ def _drive_service():
 
 SHEET_NAME = "商品管理"
 
+# 「商品管理」シートの列インデックス（0始まり） ← スプレッドシートの列順変更禁止
+# A  B   C       D         E        F       G       H          I       J
+# 0  1   2       3         4        5       6       7          8       9
+# 管ID 画像 出品サイト ステータス 仕入れ日 仕入れ値 仕入れ元 問合番号 仕入れ担当 販売価格
+#
+# K   L         M    N    O    P     Q        R        S               T
+# 10  11        12   13   14   15    16       17       18              19
+# 不良 仕入れ特記 管理者 撮影日 SKU  ASIN 状態-仕入れ 状態-撮影 商品情報-非常に良い 商品情報-良い
+#
+# U     V   W    X   Y    Z     AA    AB  AC              AD         AE
+# 20    21  22   23  24   25    26    27  28              29         30
+# 型番など 状態 状態2 備考 計算用 問合発番日 問合発番日 (空) カート価格予想 FBAライバル数 最低販売価格
 COL_KANRI_ID    = 0
 COL_STATUS      = 3
 COL_SHIIRE      = 4
 COL_HANBAI      = 9
 COL_SKU         = 14
 COL_ASIN        = 15
-COL_STATE       = 17
-COL_NOTE_VG     = 18
-COL_NOTE_G      = 19
-COL_SHIPMENT_ID = 21   # V: FBA Shipment ID (U列は「型番など」で使用中のため)
-COL_CART_PRICE  = 28   # AC: カートに入る価格予想（自動書き込み）
-COL_RIVAL_COUNT = 29   # AD: 同条件FBAライバル数（自動書き込み）
-COL_MIN_PRICE   = 30   # AE: 最低販売価格（空=現在価格を下限として扱う）
+COL_STATE       = 17  # R: 状態-撮影（非常に良い/良い/許容可能）
+COL_NOTE_VG     = 18  # S: 商品情報入力-非常に良い
+COL_NOTE_G      = 19  # T: 商品情報入力-良い
+COL_SHIPMENT_ID = 21  # V: 状態（FBA Shipment ID 用途で使用）
+COL_CART_PRICE  = 28  # AC: カートに入る価格予想（自動書き込み）
+COL_RIVAL_COUNT = 29  # AD: 同条件FBAライバル数（自動書き込み）
+COL_MIN_PRICE   = 30  # AE: 最低販売価格（空=現在価格を下限として扱う）
 
 CONDITION_FBA_MAP = {
     "used_very_good":  "UsedVeryGood",
@@ -590,6 +602,93 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
             updated += 1
         except Exception as e:
             _batch_write_reprice(t["sheet_row"], target, rival_count, None, spreadsheet_id)
+            yield f"  → エラー: {e}"
+            failed += 1
+        time.sleep(1)
+
+    yield f"完了: 更新 {updated} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+
+
+def run_set_price_from_min(dry_run: bool = True, spreadsheet_id=None):
+    """generator: AE列（最低販売価格）に入力された値をそのままAmazon出品価格に設定する。
+
+    - ステータスが「3.出品済み」かつ AE列が空でない行が対象
+    - dry_run=True のときはログのみ（実際の変更なし）
+    - 変更後は J列（販売価格）もスプレッドシートに書き戻す
+    """
+    from sp_api.api import ListingsItems
+
+    yield "スプレッドシート読み込み中..."
+    all_rows = _read_rows("AE", spreadsheet_id)
+
+    targets = []
+    for sheet_row, row in all_rows:
+        if _cell(row, COL_STATUS) != "3.出品済み":
+            continue
+        sku      = _cell(row, COL_SKU)
+        price_str = _cell(row, COL_HANBAI)
+        min_str   = _cell(row, COL_MIN_PRICE)
+        if not sku or not min_str:
+            continue
+        try:
+            new_price = int(float(min_str.replace(",", "").replace("¥", "")))
+        except ValueError:
+            continue
+        try:
+            current = int(float(price_str.replace(",", "").replace("¥", ""))) if price_str else None
+        except ValueError:
+            current = None
+        targets.append({
+            "sheet_row": sheet_row,
+            "kanri_id":  _cell(row, COL_KANRI_ID),
+            "sku":       sku,
+            "current":   current,
+            "new_price": new_price,
+        })
+
+    yield f"対象: {len(targets)} 件（3.出品済み かつ 最低販売価格入力済み）"
+    if not targets:
+        yield "対象なし。終了します。"
+        return
+
+    from sp_api.base import Marketplaces
+    listings_api = None if dry_run else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    updated = skipped = failed = 0
+
+    for t in targets:
+        current_label = f"{t['current']:,}円" if t["current"] else "不明"
+        yield f"[{t['kanri_id']}] 現在={current_label} → 最低販売価格={t['new_price']:,}円"
+
+        if t["current"] == t["new_price"]:
+            yield f"  → 変更不要（すでに同じ価格）"
+            skipped += 1
+            continue
+
+        if dry_run:
+            yield f"  → [ドライラン] {current_label} → {t['new_price']:,}円"
+            updated += 1
+            continue
+
+        try:
+            listings_api.patch_listings_item(
+                sellerId=_seller_id(), sku=t["sku"],
+                marketplaceIds=[_marketplace_id()],
+                body={
+                    "productType": "PRODUCT",
+                    "patches": [{"op": "replace", "path": "/attributes/purchasable_offer",
+                                 "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(t["new_price"])}]}]}]}],
+                },
+            )
+            # J列（販売価格）をスプレッドシートに書き戻す
+            _sheets_service().spreadsheets().values().update(
+                spreadsheetId=_ssid(spreadsheet_id),
+                range=f"{SHEET_NAME}!J{t['sheet_row']}",
+                valueInputOption="RAW",
+                body={"values": [[str(t["new_price"])]]},
+            ).execute()
+            yield f"  → 更新完了: {current_label} → {t['new_price']:,}円"
+            updated += 1
+        except Exception as e:
             yield f"  → エラー: {e}"
             failed += 1
         time.sleep(1)
