@@ -26,7 +26,6 @@ SUMMARY_SS_URL   = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit
 _COL_SKU    = 0   # A
 _COL_STATUS = 1   # B
 _COL_NAME   = 2   # C
-_COL_PAGE   = 4   # E: 商品ページ（HYPERLINK数式）
 _COL_COND   = 5   # F
 _COL_PRICE  = 6   # G: 販売価格
 _COL_CART   = 7   # H: カート獲得
@@ -34,6 +33,7 @@ _COL_CPRICE = 8   # I: カート価格
 _COL_CCOND  = 9   # J: カート状態
 _COL_FMIN   = 14  # O: 同コンFBA最低金額
 _COL_CHANGE = 15  # P: 変更金額
+_COL_ASIN   = 16  # Q: ASIN
 
 # ============================================================
 # スタイル
@@ -59,21 +59,12 @@ def load_summary():
     svc = amazon._sheets_service()
     result = svc.spreadsheets().values().get(
         spreadsheetId=SUMMARY_SS_ID,
-        range="商品一覧!A1:P4000",
+        range="商品一覧!A1:Q4000",
     ).execute()
     return result.get("values", [])
 
 def _cell(row, idx, default=""):
     return row[idx].strip() if len(row) > idx else default
-
-def _asin_from_page(page_formula: str) -> str:
-    """=HYPERLINK("https://www.amazon.co.jp/dp/XXXX","XXXX") からASINを抽出"""
-    if "/dp/" in page_formula:
-        try:
-            return page_formula.split("/dp/")[1].split('"')[0].split("?")[0]
-        except Exception:
-            pass
-    return ""
 
 if st.button("🔄 最新データを読み込む", key="reload"):
     load_summary.clear()
@@ -91,8 +82,8 @@ items = []
 for sheet_row_idx, row in enumerate(raw[1:], start=2):
     if _cell(row, _COL_STATUS) != "販売中":
         continue
-    sku     = _cell(row, _COL_SKU)
-    asin    = _asin_from_page(_cell(row, _COL_PAGE))
+    sku      = _cell(row, _COL_SKU)
+    asin     = _cell(row, _COL_ASIN)
     page_url = f"https://www.amazon.co.jp/dp/{asin}" if asin else ""
     items.append({
         "sheet_row":    sheet_row_idx,
@@ -121,9 +112,9 @@ st.divider()
 # ============================================================
 df = pd.DataFrame(items)
 
-# 数値列を整数変換（空文字はNoneのまま）
+# 数値列を変換（NaN=空セル表示。Int64だと"None"テキストになるのでfloatを使う）
 for col in ["販売価格", "カート価格", "同コンFBA最低金額", "変更金額"]:
-    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df[col] = pd.to_numeric(df[col], errors="coerce")
 
 edited = st.data_editor(
     df[[
@@ -180,7 +171,7 @@ if apply_btn:
             "sku":         orig["sku"],
             "kanri_id":    orig["管理ID"],
             "sheet_row":   orig["sheet_row"],
-            "current":     int(orig["販売価格"]) if str(orig["販売価格"]).isdigit() else None,
+            "current":     int(float(orig["販売価格"])) if orig["販売価格"] not in ("", None) else None,
             "new_price":   int(new_val),
         })
 
