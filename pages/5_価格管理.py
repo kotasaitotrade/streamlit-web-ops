@@ -100,8 +100,13 @@ if st.button("🔄 Amazonから最新データを取得", key="reload"):
     load_summary.clear()
     st.rerun()
 
-with st.spinner("読み込み中..."):
-    raw = load_summary()
+try:
+    with st.spinner("読み込み中..."):
+        raw = load_summary()
+except Exception as e:
+    st.error(f"❌ データの読み込みに失敗しました（通信状況をご確認ください）: {e}")
+    st.button("🔁 再読み込み", on_click=load_summary.clear)
+    st.stop()
 
 if len(raw) < 2:
     st.warning("データがありません。「Amazonから最新データを取得」を押してください。")
