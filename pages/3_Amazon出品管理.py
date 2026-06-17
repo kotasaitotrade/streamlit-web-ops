@@ -380,13 +380,17 @@ with tab5:
             "発送可能終了日", value=date.today() + timedelta(days=14), key="fba_ship_end"
         )
 
+    date_invalid = ship_start_date > ship_end_date
+    if date_invalid:
+        st.error("発送可能開始日が終了日より後になっています。日付を見直してください。")
+
     if not _plan_id:
         st.caption("💡 ① を実行するとプランIDが自動入力されます。または上の欄に手動で入力してください。")
     get_transport = st.button(
         "▶ 輸送オプションを取得",
         key="get_transport",
         type="primary",
-        disabled=not _plan_id,
+        disabled=not _plan_id or date_invalid,
     )
 
     if get_transport:
