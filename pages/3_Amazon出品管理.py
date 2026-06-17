@@ -138,7 +138,7 @@ Amazon カタログを検索して ASIN を自動書き込みします。
     if st.session_state.get("asin_confirm_needed"):
         st.warning("⚠️ スプレッドシートの ASIN 列を上書きします。よろしいですか？")
         c_ok, c_cancel = st.columns([1, 4])
-        if c_ok.button("✅ 実行する", key="run_asin_confirm", type="primary"):
+        if c_ok.button("✅ はい、上書きして実行", key="run_asin_confirm", type="primary"):
             st.session_state["asin_confirm_needed"] = False
             log_area = st.empty()
             with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
@@ -162,7 +162,7 @@ with tab3:
 | 対象 | `3.出品済み` の全商品 |
 | 参照価格 | 同コンディション（良い/非常に良い/可）のFBA最安値 |
 | 目標価格 | 参照価格 − 引き下げ幅（円）|
-| 下限 | スプレッドシートW列の最低価格（0=無制限）|
+| 下限 | スプレッドシートAE列（最低販売価格）。空の場合は現在価格を下限とする（=値下げしない）|
 | API呼び出し | 同一ASINはキャッシュで1回のみ |
 """)
 

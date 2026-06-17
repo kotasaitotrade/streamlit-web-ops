@@ -506,8 +506,8 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
 
     ロジック:
       target = 同条件FBA最安値 - step_yen
-      W列(最低価格)が設定されていれば下限として使用。空の場合は現在価格が下限（デフォルト）。
-      X列にカートに入る価格予想、Y列にFBAライバル数を常に書き込む。
+      AE列(最低販売価格)が設定されていれば下限として使用。空の場合は現在価格が下限（デフォルト）。
+      AC列にカートに入る価格予想、AD列にFBAライバル数を常に書き込む。
     """
     from sp_api.api import ListingsItems, Products
     from sp_api.base import Marketplaces
@@ -530,7 +530,7 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
             current = int(float(price_str.replace(",", "").replace("¥", "")))
         except ValueError:
             continue
-        # W列が空 → 現在価格を下限（デフォルト = 価格を下げない）
+        # AE列が空 → 現在価格を下限（デフォルト = 価格を下げない）
         try:
             floor = int(float(min_str.replace(",", ""))) if min_str else current
         except ValueError:
