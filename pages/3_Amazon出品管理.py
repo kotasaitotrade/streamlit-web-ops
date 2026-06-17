@@ -141,10 +141,13 @@ Amazon カタログを検索して ASIN を自動書き込みします。
         if c_ok.button("✅ はい、上書きして実行", key="run_asin_confirm", type="primary"):
             st.session_state["asin_confirm_needed"] = False
             log_area = st.empty()
-            with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
-                lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
-            st.success("✅ 完了しました")
-            _get_status_counts.clear()
+            try:
+                with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
+                    lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
+                st.success("✅ 完了しました")
+                _get_status_counts.clear()
+            except Exception as e:
+                st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
         if c_cancel.button("キャンセル", key="run_asin_cancel"):
             st.session_state["asin_confirm_needed"] = False
             st.rerun()
@@ -182,14 +185,17 @@ with tab3:
     if run_reprice:
         log_area = st.empty()
         label = "ドライラン" if dry3 else "本番"
-        with st.spinner(f"価格調整中 [{label}]... (1件あたり約1秒)"):
-            lines = _stream_logs(
-                amazon.run_auto_reprice(dry_run=dry3, step_yen=int(step_yen), spreadsheet_id=ss_id),
-                log_area,
-            )
-        st.success("✅ 完了しました")
-        if not dry3:
-            _get_status_counts.clear()
+        try:
+            with st.spinner(f"価格調整中 [{label}]... (1件あたり約1秒)"):
+                lines = _stream_logs(
+                    amazon.run_auto_reprice(dry_run=dry3, step_yen=int(step_yen), spreadsheet_id=ss_id),
+                    log_area,
+                )
+            st.success("✅ 完了しました")
+            if not dry3:
+                _get_status_counts.clear()
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
     st.divider()
     st.subheader("💰 最低販売価格をそのまま反映")
@@ -216,14 +222,17 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
     if run_set_min:
         log_area2 = st.empty()
         label2 = "ドライラン" if dry_min else "本番"
-        with st.spinner(f"価格反映中 [{label2}]... (1件あたり約1秒)"):
-            _stream_logs(
-                amazon.run_set_price_from_min(dry_run=dry_min, spreadsheet_id=ss_id),
-                log_area2,
-            )
-        st.success("✅ 完了しました")
-        if not dry_min:
-            _get_status_counts.clear()
+        try:
+            with st.spinner(f"価格反映中 [{label2}]... (1件あたり約1秒)"):
+                _stream_logs(
+                    amazon.run_set_price_from_min(dry_run=dry_min, spreadsheet_id=ss_id),
+                    log_area2,
+                )
+            st.success("✅ 完了しました")
+            if not dry_min:
+                _get_status_counts.clear()
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
 
 # ── タブ4: FNSKUラベル ───────────────────────────────────────
@@ -255,8 +264,12 @@ with tab4:
 
     if run_labels:
         sku_filter = target_sku.strip()
-        with st.spinner("PDF 生成中... (SP-API と Drive にアクセスします)"):
-            pdf_bytes, logs = amazon.run_fnsku_labels(target_sku=sku_filter, spreadsheet_id=ss_id)
+        try:
+            with st.spinner("PDF 生成中... (SP-API と Drive にアクセスします)"):
+                pdf_bytes, logs = amazon.run_fnsku_labels(target_sku=sku_filter, spreadsheet_id=ss_id)
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
+            pdf_bytes, logs = None, []
 
         log_html = "\n".join(logs[-60:])
         st.markdown(f'<div class="log-box">{log_html}</div>', unsafe_allow_html=True)
@@ -310,10 +323,14 @@ with tab5:
     if run_fba:
         log_area5 = st.empty()
         label = "ドライラン" if dry5 else "本番"
-        with st.spinner(f"処理中 [{label}]..."):
-            logs5, pdf5, plan5 = amazon.run_fba_inbound(
-                account_name=account, dry_run=dry5, spreadsheet_id=ss_id
-            )
+        try:
+            with st.spinner(f"処理中 [{label}]..."):
+                logs5, pdf5, plan5 = amazon.run_fba_inbound(
+                    account_name=account, dry_run=dry5, spreadsheet_id=ss_id
+                )
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
+            logs5, pdf5, plan5 = [], None, None
 
         log_html5 = "\n".join(logs5[-120:])
         log_area5.markdown(f'<div class="log-box">{log_html5}</div>', unsafe_allow_html=True)
@@ -510,10 +527,13 @@ with tab5:
 
     if run_receipt:
         log_area_r = st.empty()
-        with st.spinner("Amazon の受取状況を確認中..."):
-            lines_r = _stream_logs(amazon.run_receipt_check(spreadsheet_id=ss_id), log_area_r)
-        st.success("✅ 完了しました")
-        _get_status_counts.clear()
+        try:
+            with st.spinner("Amazon の受取状況を確認中..."):
+                lines_r = _stream_logs(amazon.run_receipt_check(spreadsheet_id=ss_id), log_area_r)
+            st.success("✅ 完了しました")
+            _get_status_counts.clear()
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
 
 # ── タブ6: 商品サマリー ──────────────────────────────────────
