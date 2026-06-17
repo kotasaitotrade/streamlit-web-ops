@@ -64,7 +64,12 @@ def load_summary():
     return result.get("values", [])
 
 def _cell(row, idx, default=""):
-    return row[idx].strip() if len(row) > idx else default
+    if len(row) <= idx:
+        return default
+    val = row[idx]
+    if val is None:
+        return default
+    return str(val).strip()
 
 if st.button("🔄 最新データを読み込む", key="reload"):
     load_summary.clear()
