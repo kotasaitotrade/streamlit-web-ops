@@ -510,52 +510,89 @@ with tab5:
 
 
 # ── タブ6: 商品サマリー ──────────────────────────────────────
+SUMMARY_SS_ID = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
+SUMMARY_SS_URL = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit"
+
 with tab6:
-    st.subheader("📊 商品サマリー出力")
+    st.subheader("📊 商品サマリー")
+    st.markdown(
+        f"出力先: **[商品一覧スプレッドシート]({SUMMARY_SS_URL})**"
+    )
+    st.divider()
+
+    # ── ① サマリー更新 ──────────────────────────────────────
+    st.markdown("### ① サマリー更新")
     st.markdown("""
-**佐藤さん・工藤さん両アカウント**の全商品を1つのスプレッドシートにまとめます。
+FBA在庫・注文履歴・競合価格・カート獲得状況をAmazon APIから取得して一覧を更新します。
 
-| 項目 | 内容 |
+| 情報 | 取得元 |
 |---|---|
-| 商品名 | Amazon カタログから自動取得 |
-| 写真 | Google Drive の1枚目の画像 |
-| 出品中 | ステータスが `3.出品済み` なら ○ |
-| その他 | 販売価格・カート価格予想・ライバル数・最低価格・仕入れ値など |
+| ステータス・商品名・写真 | FBA Inventory / CatalogItems API |
+| 販売価格・カート価格 | Products Pricing API |
+| カート獲得（○/△/✗） | get_listings_offer |
+| 仕入れ値・最低販売価格 | 管理スプレッドシート |
 """)
-
-    out_ss_id = st.text_input(
-        "既存スプレッドシートID（空欄=新規作成）",
-        placeholder="例: 1ABCxxx...  ← 2回目以降は前回作成したIDを入れると上書き更新",
-        key="summary_ss_id",
-    )
-
-    run_summary = st.button(
-        "▶ スプレッドシートを作成/更新",
-        key="run_summary",
-        type="primary",
-    )
-    st.caption("⏱ 商品名を Amazon API で取得するため、件数に応じて数分かかります。")
+    run_summary = st.button("▶ サマリーを更新", key="run_summary", type="primary")
+    st.caption("⏱ 商品数に応じて数分かかります（1商品あたり約2.5秒）")
 
     if run_summary:
         log_area6 = st.empty()
-        result_url = None
         lines6 = []
         try:
-            with st.spinner("サマリー作成中..."):
-                for msg in amazon.run_create_summary_sheet(out_ss_id.strip() or None):
+            with st.spinner("サマリー更新中..."):
+                for msg in amazon.run_create_summary_sheet(SUMMARY_SS_ID):
                     lines6.append(msg)
                     log_area6.markdown(
                         '<div class="log-box">' + "\n".join(lines6[-80:]) + "</div>",
                         unsafe_allow_html=True,
                     )
-                    if msg.startswith("URL: "):
-                        result_url = msg[5:]
         except Exception as e:
             st.error(f"❌ エラーが発生しました: {e}")
             import traceback
             st.code(traceback.format_exc(), language="python")
-        if result_url:
+        else:
+            st.success("✅ 更新完了")
+            st.markdown(f"**[📊 スプレッドシートを開く]({SUMMARY_SS_URL})**")
+
+    st.divider()
+
+    # ── ② O列（最低販売価格）をAmazonに反映 ─────────────────
+    st.markdown("### ② 最低販売価格をAmazonに反映")
+    st.markdown("""
+サマリーシートの **O列（最低販売価格）** に入力した価格を Amazon 出品価格に設定します。
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | ステータスが `販売中` または `納品中` かつ O列に値がある行 |
+| 変更後 | Amazon 出品価格・サマリーG列・管理シートJ列をすべて更新 |
+""")
+    c6a, c6b = st.columns([1, 3])
+    with c6a:
+        dry6 = st.checkbox("ドライラン", value=True, key="dry6")
+    run_set_price = c6b.button(
+        "▶ ドライラン確認" if dry6 else "▶ 本番反映",
+        key="run_set_price",
+        type="secondary" if dry6 else "primary",
+    )
+    if not dry6:
+        st.warning("⚠️ 本番モード: Amazon 出品価格を実際に変更します。")
+
+    if run_set_price:
+        log_area6b = st.empty()
+        try:
+            label6 = "ドライラン" if dry6 else "本番"
+            with st.spinner(f"価格反映中 [{label6}]..."):
+                _stream_logs(
+                    amazon.run_set_price_from_summary(
+                        dry_run=dry6,
+                        summary_spreadsheet_id=SUMMARY_SS_ID,
+                        management_spreadsheet_id=ss_id,
+                    ),
+                    log_area6b,
+                )
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました: {e}")
+            import traceback
+            st.code(traceback.format_exc(), language="python")
+        else:
             st.success("✅ 完了しました")
-            st.markdown(f"**[📊 スプレッドシートを開く]({result_url})**")
-            st.code(result_url.split("/d/")[1].split("/")[0], language=None)
-            st.caption("↑ このIDを「既存スプレッドシートID」欄に入れると次回から上書き更新になります")
