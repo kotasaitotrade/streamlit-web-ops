@@ -1544,7 +1544,12 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                 for oi in ir.payload.get("OrderItems", []):
                     sku = oi.get("SellerSKU", "")
                     if sku and sku not in sold_skus:
-                        sold_skus[sku] = {"purchase_date": purchase_date}
+                        ip = oi.get("ItemPrice", {})
+                        sold_price = ip.get("Amount", "") if isinstance(ip, dict) else ""
+                        sold_skus[sku] = {
+                            "purchase_date": purchase_date,
+                            "price": str(int(float(sold_price))) if sold_price else "",
+                        }
                 time.sleep(0.3)
             except Exception:
                 pass
@@ -1582,6 +1587,40 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         except Exception as e:
             yield f"スプレッドシート({account_name})読み込みエラー: {e}"
     yield f"  スプレッドシート補足: {len(kanri_master)} 管理ID"
+
+    # ── Step 4.5: 自分の出品価格を一括取得（販売中・納品中 SKU、最大20件ずつ）──
+    # Products.get_price(ItemType="Sku") → 0.5 req/s、最大20 SKU/リクエスト
+    listing_price_map: dict[str, str] = {}  # sku → 現在の出品価格
+    active_skus = [sku for sku, d in fba_items.items() if d.get("total_qty", 0) > 0]
+    active_skus += list(inbound_skus.keys())
+    if active_skus:
+        products_api_price = Products(credentials=creds, marketplace=Marketplaces.JP)
+        for i in range(0, len(active_skus), 20):
+            batch = active_skus[i : i + 20]
+            for attempt in range(4):
+                try:
+                    resp = products_api_price.get_product_pricing_for_skus(
+                        seller_sku_list=batch, MarketplaceId=_marketplace_id()
+                    )
+                    items = resp.payload if isinstance(resp.payload, list) else [resp.payload]
+                    for item in items:
+                        if item.get("status") != "Success":
+                            continue
+                        sku_val = item.get("SellerSKU", "")
+                        for offer in item.get("Product", {}).get("Offers", []):
+                            lp = offer.get("BuyingPrice", {}).get("ListingPrice", {}).get("Amount")
+                            if lp is not None:
+                                listing_price_map[sku_val] = str(int(lp))
+                                break
+                    time.sleep(2.5)
+                    break
+                except Exception as e:
+                    if "QuotaExceeded" in str(e) and attempt < 3:
+                        time.sleep(10 * (attempt + 1))
+                    else:
+                        yield f"  出品価格取得エラー: {e}"
+                        break
+    yield f"  → 出品価格取得: {len(listing_price_map)} 件"
 
     # ── Step 5: 価格・写真・行データ組み立て ────────────────────────────
     yield f"⑤ 価格・写真を取得中... (販売中={sum(1 for s in fba_items.values() if s.get('total_qty',0)>0)}, 納品中={len(inbound_skus)}, 売却済み={len(sold_skus)})"
@@ -1699,8 +1738,14 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
         page_link = f'=HYPERLINK("https://www.amazon.co.jp/dp/{asin}", "{asin}")' if asin else ""
 
-        # 販売価格: SKUに埋め込まれた価格を優先、なければスプレッドシートJ列
-        hanbai = _price_from_sku(sku, kanri_id) or master.get("hanbai", "")
+        # 販売価格: Amazon APIを正とする
+        # 販売中/納品中 → Products.get_price で取得した現在の出品価格
+        # 売却済み     → Orders APIの実際の売却価格
+        # フォールバック → SKU末尾に埋め込まれた価格
+        if status == "売却済み":
+            hanbai = sold.get("price", "") or _price_from_sku(sku, kanri_id)
+        else:
+            hanbai = listing_price_map.get(sku, "") or _price_from_sku(sku, kanri_id)
 
         all_rows.append([
             sku,
