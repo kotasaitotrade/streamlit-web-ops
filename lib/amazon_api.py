@@ -238,7 +238,30 @@ def _build_queries(text: str) -> list[str]:
     cleaned = first.replace("本体", "").replace("　", " ").strip()
     if cleaned and cleaned != first:
         queries.append(cleaned)
+    # 型番フォールバック: 型番だけのクエリを末尾に追加（色付き等で0件のとき用）
+    for m in _extract_models(first):
+        if m not in queries:
+            queries.append(m)
     return list(dict.fromkeys(queries))
+
+
+def _extract_models(text: str) -> list[str]:
+    """テキストから型番らしいトークン（英字と数字が混在、長さ3以上）を抽出する。
+    例: 'PSP-3000 ラディアンレッド' → ['PSP-3000'],
+        'SEIKO ソーラー腕時計/デジアナ/H851-00B0' → ['H851-00B0']"""
+    import re
+    models = []
+    for tok in re.split(r"[\s/／,，、　|｜]+", text):
+        tok = tok.strip("　 .。・")
+        if len(tok) >= 3 and re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok):
+            models.append(tok)
+    return models
+
+
+def _normalize_model(s: str) -> str:
+    """型番比較用の正規化: 大文字化し、空白・ハイフン・中黒・ドットを除去する。"""
+    import re
+    return re.sub(r"[\s\-‐－―・･.　]+", "", s or "").upper()
 
 
 def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
@@ -273,12 +296,17 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
         return
 
     api = CatalogItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
-    success = failed = 0
+    written = rejected = notfound = 0
 
     for sheet_row, kanri_id, note_raw in targets:
         yield f"[{kanri_id}] 検索: {note_raw[:50]}"
         queries = _build_queries(note_raw)
-        found = None
+        models = _extract_models(note_raw)
+        norm_models = [_normalize_model(m) for m in models]
+
+        match_asin = match_name = None   # 型番一致した候補
+        cand_asin = cand_name = None     # 一致しなかったが最初に返ってきた候補
+
         for q in queries:
             try:
                 res = api.search_catalog_items(
@@ -288,29 +316,55 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
                     pageSize=5,
                 )
                 items = res.payload.get("items", [])
-                if items:
-                    found = items[0].get("asin")
-                    name  = items[0].get("summaries", [{}])[0].get("itemName", "")
-                    yield f"  → ASIN: {found}  {name[:40]}"
-                    break
             except Exception as e:
                 yield f"  検索エラー: {e}"
+                time.sleep(0.5)
+                continue
+
+            if not items:
+                time.sleep(0.5)
+                continue
+
+            # 最初に何か返ってきたものを「候補」として保持（型番なしの場合の参考用）
+            if cand_asin is None:
+                cand_asin = items[0].get("asin")
+                cand_name = items[0].get("summaries", [{}])[0].get("itemName", "")
+
+            # 型番一致を優先して探す（返ってきた商品名に型番が含まれるか）
+            if norm_models:
+                for it in items:
+                    nm = it.get("summaries", [{}])[0].get("itemName", "")
+                    nm_norm = _normalize_model(nm)
+                    if any(m in nm_norm for m in norm_models):
+                        match_asin = it.get("asin")
+                        match_name = nm
+                        break
+            if match_asin:
+                break
             time.sleep(0.5)
 
-        if found:
+        # ── 採用判定（型番一致のみ採用。含まれなければ不採用） ──
+        if match_asin:
+            label = "✅ 型番一致"
+            yield f"  {label}: {match_asin}  {match_name[:40]}"
             if not dry_run:
-                _update_cell(sheet_row, "P", found, spreadsheet_id)
-                yield f"  → シート書き込み完了"
+                _update_cell(sheet_row, "P", match_asin, spreadsheet_id)
+                yield "  → シート書き込み完了"
             else:
-                yield f"  → [DRY] 書き込みスキップ"
-            success += 1
+                yield "  → [DRY] 書き込みスキップ"
+            written += 1
+        elif cand_asin:
+            # 候補はあるが型番一致しない → 不採用（人間が選別できるよう候補を表示）
+            reason = "型番不一致" if models else "型番なしで検証不可"
+            yield f"  ⚠️ {reason}のため不採用（候補: {cand_asin} {(cand_name or '')[:35]}）"
+            rejected += 1
         else:
-            yield f"  → 見つかりませんでした"
-            failed += 1
+            yield "  → 見つかりませんでした"
+            notfound += 1
 
         time.sleep(1)
 
-    yield f"完了: 成功 {success} 件 / 未取得 {failed} 件"
+    yield f"完了: 書き込み {written} 件 / 不採用 {rejected} 件 / 未ヒット {notfound} 件"
 
 
 # ============================================================
