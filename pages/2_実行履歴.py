@@ -5,7 +5,6 @@ import streamlit as st
 from lib.sheets import materialize_secrets, list_jobs_for_user, list_all_jobs
 from lib.auth import require_login, logout_button
 
-st.set_page_config(page_title="実行履歴", layout="wide", page_icon="📋")
 materialize_secrets()
 
 user = require_login()

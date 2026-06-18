@@ -8,7 +8,6 @@ from lib.sheets import (
 )
 from lib.auth import require_login, logout_button
 
-st.set_page_config(page_title="ツール実行", layout="wide", page_icon="🚀")
 materialize_secrets()
 
 user = require_login()
