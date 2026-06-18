@@ -328,11 +328,20 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
     with cb1:
         dry_bb = st.checkbox("ドライラン", value=True, key="dry_bb")
     with cb2:
-        step_bb = st.number_input("奪取きざみ(円)", min_value=1, max_value=1000, value=10, step=1, key="step_bb")
+        step_bb = st.number_input(
+            "奪取きざみ(円)", min_value=1, max_value=1000, value=10, step=1, key="step_bb",
+            help="カート未取得のとき、競合（カート価格やFBA最安）を何円下回るか。大きいほど取りやすいが安くなる。",
+        )
     with cb3:
-        raise_bb = st.number_input("値上げきざみ(円)", min_value=1, max_value=5000, value=50, step=10, key="raise_bb")
+        raise_bb = st.number_input(
+            "値上げきざみ(円)", min_value=1, max_value=5000, value=50, step=10, key="raise_bb",
+            help="カート保持中に1回の実行で何円ずつ上げるか。毎時実行で少しずつ上げ、落ちたら下げ戻す探り用。大きいほど早く上がるが落ちやすい。",
+        )
     with cb4:
-        prem_bb = st.number_input("FBM上乗せ(%)", min_value=0, max_value=50, value=5, step=1, key="prem_bb")
+        prem_bb = st.number_input(
+            "FBM上乗せ(%)", min_value=0, max_value=50, value=5, step=1, key="prem_bb",
+            help="競合がFBM（自社発送）だけのとき、FBA優位を活かしてFBM最安より何%まで上に乗せるか。",
+        )
     if not dry_bb:
         st.warning("⚠️ 本番モード: SP-API に実際に価格変更リクエストを送信します。")
 
