@@ -1,0 +1,39 @@
+name: 商品サマリー自動更新
+
+on:
+  schedule:
+    # 毎時 17 分に実行（UTC。:00 ちょうどは混雑するため少しずらす）
+    - cron: "17 * * * *"
+  workflow_dispatch: {}  # 手動実行も可能
+
+# 同時実行を防ぐ（前回が長引いても重ならない）
+concurrency:
+  group: update-summary
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 依存パッケージのインストール
+        run: pip install -r requirements.txt
+
+      - name: サマリー更新を実行
+        env:
+          GSPREAD_TOKEN_JSON:   ${{ secrets.GSPREAD_TOKEN_JSON }}
+          SP_LWA_APP_ID:        ${{ secrets.SP_LWA_APP_ID }}
+          SP_LWA_CLIENT_SECRET: ${{ secrets.SP_LWA_CLIENT_SECRET }}
+          SP_REFRESH_TOKEN:     ${{ secrets.SP_REFRESH_TOKEN }}
+          SP_SELLER_ID:         ${{ secrets.SP_SELLER_ID }}
+          SP_MARKETPLACE_ID:    ${{ secrets.SP_MARKETPLACE_ID }}
+        run: python scripts/ci_update_summary.py
