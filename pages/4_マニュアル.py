@@ -11,12 +11,9 @@ logout_button()
 
 st.title("📖 マニュアル")
 
-page = st.radio(
-    "ページを選択",
-    ["🚚 FBA納品フロー"],
-    label_visibility="collapsed",
-    horizontal=True,
-)
+# 現状はマニュアルが1種類のみのため、1択ラジオは表示せず内容を直接表示する。
+# マニュアルが増えたら下記をラジオ（st.radio）に戻す。
+page = "🚚 FBA納品フロー"
 
 st.divider()
 
