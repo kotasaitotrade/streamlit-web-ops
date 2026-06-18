@@ -81,7 +81,9 @@ def _fmt_price(val: str) -> str:
 # ============================================================
 # 更新ボタン
 # ============================================================
-if st.button("🔄 Amazonから最新データを取得", key="reload"):
+reload_clicked = st.button("🔄 Amazonから最新データを取得", key="reload")
+st.caption("⏱ 商品数に応じて数分かかります。完了までこのページを開いたままにしてください。")
+if reload_clicked:
     log_area = st.empty()
     lines = []
     try:
