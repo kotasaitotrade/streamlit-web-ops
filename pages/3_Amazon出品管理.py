@@ -50,7 +50,7 @@ ACCOUNT_LABELS = {
 
 def _reset_confirm_flags():
     """アカウント切替時、本番実行の確認待ちを解除（別アカウントへの誤実行防止）。"""
-    for _k in ("confirm_reprice", "confirm_set_min", "confirm_fba", "confirm_set_price"):
+    for _k in ("confirm_reprice", "confirm_set_min", "confirm_fba", "confirm_set_price", "asin_confirm_needed"):
         st.session_state.pop(_k, None)
 
 account = st.selectbox(
@@ -134,29 +134,51 @@ tab1, tab3, tab4, tab5, tab6 = st.tabs([
 with tab1:
     st.subheader("🔍 ASIN自動取得")
     st.markdown("""
-**ASIN列が空** で **仕入れ特記事項に型番・商品名が入っている行** を対象に、
+**ASIN列が空** で **仕入れ特記事項（L列）に型番・商品名が入っている行** を対象に、
 Amazon カタログを検索して ASIN を自動書き込みします。
 """)
-    if st.button("▶ 実行する", key="run_asin", type="primary"):
-        st.session_state["asin_confirm_needed"] = True
+    c_asin1, c_asin2 = st.columns([1, 3])
+    with c_asin1:
+        dry_asin = st.checkbox("ドライラン", value=True, key="dry_asin")
+    run_asin = c_asin2.button(
+        "▶ ドライラン実行（書き込まず確認）" if dry_asin else "▶ 本番実行（ASINを書き込む）",
+        key="run_asin",
+        type="secondary" if dry_asin else "primary",
+    )
+    st.caption("⏱ 対象1件あたり約1〜2秒。ドライランで結果を確認してから本番実行できます。")
 
-    if st.session_state.get("asin_confirm_needed"):
-        st.warning("⚠️ スプレッドシートの ASIN 列を上書きします。よろしいですか？")
-        c_ok, c_cancel = st.columns([1, 4])
-        if c_ok.button("✅ はい、上書きして実行", key="run_asin_confirm", type="primary"):
+    # ドライランは即実行、本番は確認ステップを挟む
+    do_asin = False
+    if run_asin:
+        if dry_asin:
+            do_asin = True
+        else:
+            st.session_state["asin_confirm_needed"] = True
+    _ph_asin = st.empty()
+    if st.session_state.get("asin_confirm_needed") and not dry_asin:
+        with _ph_asin.container():
+            st.warning(f"⚠️ 【{ACCOUNT_LABELS.get(account, account)}】空のASIN欄に検索結果を実際に書き込みます。よろしいですか？")
+            ca, cb = st.columns([1, 2])
+            yes = ca.button("✅ はい、本番実行する", type="primary", key="run_asin_confirm")
+            no = cb.button("キャンセル", key="run_asin_cancel")
+        if yes:
             st.session_state["asin_confirm_needed"] = False
-            log_area = st.empty()
-            try:
-                with st.spinner("ASIN 検索中... (1件あたり約1秒)"):
-                    lines = _stream_logs(amazon.run_asin_lookup(dry_run=False, spreadsheet_id=ss_id), log_area)
-                st.success("✅ 完了しました")
-                _get_status_counts.clear()
-            except Exception as e:
-                st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
-        if c_cancel.button("キャンセル", key="run_asin_cancel"):
+            _ph_asin.empty()
+            do_asin = True
+        elif no:
             st.session_state["asin_confirm_needed"] = False
-            st.rerun()
+            _ph_asin.empty()
 
+    if do_asin:
+        log_area = st.empty()
+        label_asin = "ドライラン" if dry_asin else "本番"
+        try:
+            with st.spinner(f"ASIN 検索中 [{label_asin}]... (1件あたり約1〜2秒)"):
+                lines = _stream_logs(amazon.run_asin_lookup(dry_run=dry_asin, spreadsheet_id=ss_id), log_area)
+            st.success("✅ 完了しました")
+            _get_status_counts.clear()
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
 
 # ── タブ3: 価格調整 ──────────────────────────────────────────

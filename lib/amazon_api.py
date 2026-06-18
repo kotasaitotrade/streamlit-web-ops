@@ -247,19 +247,22 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
     from sp_api.base import Marketplaces
 
     yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("Q", spreadsheet_id)
+    all_rows = _read_rows("U", spreadsheet_id)
+
+    # 検索クエリ元の列（実シート確認済み）:
+    #   L列(index 11) = 仕入れ特記事項（型番・商品名）← 主。
+    #   U列(index 20) = 型番など ← L列が空のときのフォールバック。
+    # （Q列 index 16 は「状態-仕入れ」=コンディションであり検索クエリには使わない）
+    COL_SHIIRE_NOTE = 11
+    COL_MODEL_NOTE  = 20
 
     targets = []
     for sheet_row, row in all_rows:
-        asin  = _cell(row, COL_ASIN)
-        note  = _cell(row, 20) if len(row) > 20 else ""
-        # 仕入れ特記事項: スプシの Q列(index=16) or R列 — 既存スクリプトは df['仕入れ特記事項'] を使用
-        # 実際の列は確認済み (asin_lookup.py では load_dataframe で読む)
-        # ここでは P列(15)のASINが空で、何か特記事項があれば対象とする
+        asin = _cell(row, COL_ASIN)
         if asin:
             continue
-        # 仕入れ特記事項が入っている列を探す（Q列 = index 16）
-        note = _cell(row, 16) if len(row) > 16 else ""
+        # ASIN が空の行のみ対象。仕入れ特記事項(L) → 無ければ 型番など(U)
+        note = _cell(row, COL_SHIIRE_NOTE) or _cell(row, COL_MODEL_NOTE)
         if not note or note in _INVALID_KW:
             continue
         targets.append((sheet_row, _cell(row, COL_KANRI_ID), note))
