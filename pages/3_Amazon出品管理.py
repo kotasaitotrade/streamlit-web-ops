@@ -50,7 +50,8 @@ ACCOUNT_LABELS = {
 
 def _reset_confirm_flags():
     """アカウント切替時、本番実行の確認待ちを解除（別アカウントへの誤実行防止）。"""
-    for _k in ("confirm_reprice", "confirm_set_min", "confirm_fba", "confirm_set_price", "asin_confirm_needed"):
+    for _k in ("confirm_reprice", "confirm_set_min", "confirm_fba", "confirm_set_price",
+               "confirm_bb", "asin_confirm_needed"):
         st.session_state.pop(_k, None)
 
 account = st.selectbox(
@@ -305,6 +306,73 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
                 )
             st.success("✅ 完了しました")
             if not dry_min:
+                _get_status_counts.clear()
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
+
+    st.divider()
+    st.subheader("🛒 カート連動リプライサー（NEW）")
+    st.markdown("""
+カート(BuyBox)の獲得状況に応じて賢く価格を動かします。**底値競争を避けて利益を最大化**します。
+
+| 状況 | 動き |
+|---|---|
+| **カート保持中(○)** | カートを保てる範囲で**少しずつ値上げ**（利益最大化） |
+| **カート未取得・競合FBA** | カート価格を**下回って奪取** |
+| **カート未取得・競合FBM** | FBAの強みで**同値〜やや上**で奪取（安売りしない） |
+
+⏱ **毎時サマリー更新**と組み合わせ「上げて落ちたら次サイクルで下げ戻す」探り運用が前提です。
+下限は **AE列（最低販売価格）**。空欄なら現在価格を下限（＝値下げしない）。
+""")
+    cb1, cb2, cb3, cb4 = st.columns([1, 1, 1, 1])
+    with cb1:
+        dry_bb = st.checkbox("ドライラン", value=True, key="dry_bb")
+    with cb2:
+        step_bb = st.number_input("奪取きざみ(円)", min_value=1, max_value=1000, value=10, step=1, key="step_bb")
+    with cb3:
+        raise_bb = st.number_input("値上げきざみ(円)", min_value=1, max_value=5000, value=50, step=10, key="raise_bb")
+    with cb4:
+        prem_bb = st.number_input("FBM上乗せ(%)", min_value=0, max_value=50, value=5, step=1, key="prem_bb")
+    if not dry_bb:
+        st.warning("⚠️ 本番モード: SP-API に実際に価格変更リクエストを送信します。")
+
+    # 本番は確認ステップ
+    do_bb = False
+    if st.button("▶ ドライラン実行（変更せず確認）" if dry_bb else "▶ 本番実行（価格を変更）",
+                 key="run_bb", type="secondary" if dry_bb else "primary"):
+        if dry_bb:
+            do_bb = True
+        else:
+            st.session_state["confirm_bb"] = True
+    _ph_bb = st.empty()
+    if st.session_state.get("confirm_bb") and not dry_bb:
+        with _ph_bb.container():
+            st.warning(f"⚠️ 【{ACCOUNT_LABELS.get(account, account)}】カート状況に応じて出品価格を実際に変更します。よろしいですか？")
+            cbb1, cbb2 = st.columns([1, 2])
+            yes_bb = cbb1.button("✅ はい、本番実行する", type="primary", key="confirm_bb_yes")
+            no_bb = cbb2.button("キャンセル", key="confirm_bb_no")
+        if yes_bb:
+            st.session_state["confirm_bb"] = False
+            _ph_bb.empty()
+            do_bb = True
+        elif no_bb:
+            st.session_state["confirm_bb"] = False
+            _ph_bb.empty()
+
+    if do_bb:
+        log_area_bb = st.empty()
+        label_bb = "ドライラン" if dry_bb else "本番"
+        try:
+            with st.spinner(f"カート連動リプライス中 [{label_bb}]... (1件あたり約1〜2秒)"):
+                _stream_logs(
+                    amazon.run_buybox_reprice(
+                        dry_run=dry_bb, step_yen=int(step_bb), raise_step=int(raise_bb),
+                        fbm_premium=float(prem_bb) / 100.0, spreadsheet_id=ss_id,
+                    ),
+                    log_area_bb,
+                )
+            st.success("✅ 完了しました")
+            if not dry_bb:
                 _get_status_counts.clear()
         except Exception as e:
             st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")

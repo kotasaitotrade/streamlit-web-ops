@@ -538,6 +538,101 @@ def _extract_offer_details(payload: dict | None, sub_condition: str) -> tuple:
     return cart_price, cart_cond or "", lowest_price, lowest_cond or "", fba_rival_count, fba_min_price, is_winning, has_new_buybox, my_offer_exists
 
 
+def _analyze_offers_smart(payload: dict | None, sub_condition: str) -> dict:
+    """カート連動リプライス用の解析。同コンディションのオファーを FBA/FBM 別に分析する。
+    競合は自社オファー(MyOffer)を除外して集計する。
+
+    Returns dict:
+      my_price        : 自社の同コンディション出品価格（無ければ None）
+      is_winning      : 自分がカート(BuyBox)を取得しているか
+      cart_price      : 現在のカート価格
+      cart_is_fba     : カート獲得者が FBA か（True/False/None）
+      min_fba_comp    : 同コンディション FBA 競合の最安値（自社除く）
+      min_fbm_comp    : 同コンディション FBM 競合の最安値（自社除く）
+      fba_rival_count : 同コンディション FBA 競合数（自社除く）
+      fbm_rival_count : 同コンディション FBM 競合数（自社除く）
+    """
+    res = {
+        "my_price": None, "is_winning": False, "cart_price": None, "cart_is_fba": None,
+        "min_fba_comp": None, "min_fbm_comp": None, "fba_rival_count": 0, "fbm_rival_count": 0,
+    }
+    if not payload:
+        return res
+    sc = sub_condition.lower()
+    for offer in payload.get("Offers", []):
+        try:
+            price = int(float(offer["ListingPrice"]["Amount"]))
+        except Exception:
+            continue
+        sub    = offer.get("SubCondition", "").lower()
+        is_fba = bool(offer.get("IsFulfilledByAmazon", False)
+                      or offer.get("PrimeInformation", {}).get("IsPrime", False))
+        is_bb  = offer.get("IsBuyBoxWinner", False)
+        mine   = offer.get("MyOffer", False)
+
+        if is_bb:
+            res["cart_price"] = price
+            res["cart_is_fba"] = is_fba
+
+        if mine:
+            if sub == sc:
+                res["my_price"] = price
+            if is_bb:
+                res["is_winning"] = True
+            continue  # 自社は競合集計から除外
+
+        if sub != sc:
+            continue
+        if is_fba:
+            res["fba_rival_count"] += 1
+            if res["min_fba_comp"] is None or price < res["min_fba_comp"]:
+                res["min_fba_comp"] = price
+        else:
+            res["fbm_rival_count"] += 1
+            if res["min_fbm_comp"] is None or price < res["min_fbm_comp"]:
+                res["min_fbm_comp"] = price
+    return res
+
+
+def _decide_buybox_target(a: dict, current: int, step: int, raise_step: int,
+                          fbm_premium: float) -> tuple[int, str]:
+    """カート連動リプライスの目標価格を決める。(target, 理由) を返す。
+    - カート保持中 → カートを保てる範囲で値上げ（利益最大化）
+    - カート未取得 → 競合がFBMなら同値、FBAならカート価格を下回って奪取
+    """
+    fba = a["min_fba_comp"]
+    fbm = a["min_fbm_comp"]
+    cart = a["cart_price"]
+
+    if a["is_winning"]:
+        if fba is not None:
+            ceiling = fba - step                        # FBA競合より少し下で維持
+        elif fbm is not None:
+            ceiling = int(fbm * (1 + fbm_premium))       # FBMのみ→上に乗せられる
+        else:
+            ceiling = current + raise_step               # 競合なし
+        target = min(current + raise_step, ceiling)
+        if target <= current:
+            return current, f"カート保持・値上げ余地なし→維持({current:,}円)"
+        return target, f"カート保持→値上げ {current:,}→{target:,}円（上限{ceiling:,}）"
+
+    # カート未取得 → 奪取
+    if cart is not None and a["cart_is_fba"] is False:
+        # カート保持者が FBM → FBA なら同値で取りやすい（取得後は値上げフェーズで上げる）
+        base = fbm if fbm is not None else cart
+        return base, f"未取得・カートFBM→同値で奪取 {base:,}円"
+    if cart is not None:
+        # カート保持者が FBA → 下回って奪取
+        return cart - step, f"未取得・カートFBA→カート-{step} {cart - step:,}円"
+    if fba is not None:
+        # カート無し・FBA競合あり → FBA最安の少し下で奪取
+        return fba - step, f"未取得・FBA競合→FBA最安-{step} {fba - step:,}円"
+    if fbm is not None:
+        # カート無し・FBMのみ → FBA優位。安売りせず維持（次サイクルで様子見）
+        return current, "未取得・FBMのみ→FBA優位のため維持（安売りしない）"
+    return current, "競合情報なし→維持"
+
+
 def _batch_write_reprice(sheet_row: int, cart_price: int | None, rival_count: int,
                          new_price: int | None, spreadsheet_id=None):
     """X列(カート価格予想)・Y列(ライバル数) を常に書き込む。
@@ -682,6 +777,138 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
         time.sleep(1)
 
     yield f"完了: 更新 {updated} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+
+
+def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int = 50,
+                       fbm_premium: float = 0.05, spreadsheet_id=None):
+    """generator: カート(BuyBox)連動リプライサー。
+
+    - カート保持中(○) → カートを保てる範囲で少しずつ値上げ（利益最大化）
+    - カート未取得(✗)  → 競合がFBMなら同値、FBAならカート価格を下回って奪取
+    AE列(最低販売価格)を下限とする（空なら現在価格＝値下げしない）。
+    毎時サマリー更新と組み合わせ「上げて落ちたら次サイクルで下げ戻す」探り運用が前提。
+    """
+    from sp_api.api import ListingsItems, Products
+    from sp_api.base import Marketplaces
+
+    yield "スプレッドシート読み込み中..."
+    all_rows = _read_rows("AE", spreadsheet_id)
+
+    targets = []
+    for sheet_row, row in all_rows:
+        if _cell(row, COL_STATUS) != "3.出品済み":
+            continue
+        asin      = _cell(row, COL_ASIN)
+        sku       = _cell(row, COL_SKU)
+        price_str = _cell(row, COL_HANBAI)
+        state     = _cell(row, COL_STATE)
+        min_str   = _cell(row, COL_MIN_PRICE)
+        if not asin or not sku or not price_str:
+            continue
+        try:
+            current = int(float(price_str.replace(",", "").replace("¥", "")))
+        except ValueError:
+            continue
+        try:
+            floor = int(float(min_str.replace(",", ""))) if min_str else current
+        except ValueError:
+            floor = current
+        ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
+        targets.append({
+            "sheet_row": sheet_row, "kanri_id": _cell(row, COL_KANRI_ID),
+            "asin": asin, "sku": sku, "current": current,
+            "floor": floor, "floor_manual": bool(min_str), "sub_condition": sub_cond,
+        })
+
+    yield f"調整対象: {len(targets)} 件（3.出品済み）"
+    yield f"設定: 奪取きざみ={step_yen}円 / 値上げきざみ={raise_step}円 / FBM上乗せ={int(fbm_premium*100)}%"
+    if not targets:
+        yield "対象なし。終了します。"
+        return
+
+    products_api = Products(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    listings_api = None if dry_run else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+
+    offers_cache: dict[str, dict | None] = {}
+    raised = took = held = skipped = failed = 0
+
+    for t in targets:
+        floor_label = f"{t['floor']:,}円(手動)" if t["floor_manual"] else f"{t['floor']:,}円(現在価格)"
+        yield f"[{t['kanri_id']}] 現在={t['current']:,}円 | {t['sub_condition']} | 下限={floor_label}"
+
+        asin = t["asin"]
+        if asin not in offers_cache:
+            offers_cache[asin] = _get_item_offers(products_api, asin)
+            time.sleep(1)
+
+        a = _analyze_offers_smart(offers_cache[asin], t["sub_condition"])
+        cart_owner = ("自分" if a["is_winning"]
+                      else ("FBA" if a["cart_is_fba"] else "FBM" if a["cart_is_fba"] is False else "なし"))
+        cart_p = f"{a['cart_price']:,}円" if a["cart_price"] is not None else "—"
+        fba_p  = f"{a['min_fba_comp']:,}" if a["min_fba_comp"] is not None else "—"
+        fbm_p  = f"{a['min_fbm_comp']:,}" if a["min_fbm_comp"] is not None else "—"
+        cart_mark = "○自分" if a["is_winning"] else "✗"
+        yield (f"  状況: カート={cart_mark}({cart_owner}) カート価格={cart_p} / "
+               f"FBA競合={a['fba_rival_count']}(最安{fba_p}) / "
+               f"FBM競合={a['fbm_rival_count']}(最安{fbm_p})")
+
+        target, reason = _decide_buybox_target(a, t["current"], step_yen, raise_step, fbm_premium)
+        yield f"  判断: {reason}"
+
+        rival_total = a["fba_rival_count"] + a["fbm_rival_count"]
+
+        # 下限適用
+        if target < t["floor"]:
+            if t["floor_manual"]:
+                target = int(t["floor"] * 0.95)
+                yield f"  → 下限({t['floor']:,}円)を下回るため設定価格-5%={target:,}円"
+            else:
+                yield f"  → 下限({t['floor']:,}円≒現在価格)を下回るためスキップ"
+                _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+                skipped += 1
+                time.sleep(0.5)
+                continue
+
+        if target == t["current"]:
+            yield "  → 変更なし（維持）"
+            _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+            held += 1
+            time.sleep(0.5)
+            continue
+
+        going_up = target > t["current"]
+        if dry_run:
+            yield f"  → [ドライラン] {t['current']:,}円 → {target:,}円 {'⤴値上げ' if going_up else '⤵奪取'}"
+            _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+            if going_up:
+                raised += 1
+            else:
+                took += 1
+            time.sleep(0.3)
+            continue
+
+        try:
+            listings_api.patch_listings_item(
+                sellerId=_seller_id(), sku=t["sku"],
+                marketplaceIds=[_marketplace_id()],
+                body={"productType": "PRODUCT",
+                      "patches": [{"op": "replace", "path": "/attributes/purchasable_offer",
+                                   "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(target)}]}]}]}]},
+            )
+            _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, target, spreadsheet_id)
+            yield f"  → 更新完了: {t['current']:,}円 → {target:,}円 {'⤴値上げ' if going_up else '⤵奪取'}"
+            if going_up:
+                raised += 1
+            else:
+                took += 1
+        except Exception as e:
+            _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+            yield f"  → エラー: {e}"
+            failed += 1
+        time.sleep(1)
+
+    yield f"完了: 値上げ {raised} 件 / 奪取(値下げ) {took} 件 / 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
 
 
 def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str = None, management_spreadsheet_id=None):
