@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# 認証情報をハードコードしたローカル実行スクリプト（公開リポジトリへの誤コミット防止）
+run_summary_local.py
+run_set_min_price_local.py
+debug_cols.py
