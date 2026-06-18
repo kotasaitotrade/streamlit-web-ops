@@ -204,23 +204,47 @@ apply_btn = c2.button(
 if not dry_run:
     st.warning("⚠️ 本番モード: Amazonの出品価格を実際に変更します。")
 
-if apply_btn:
-    changes = []
-    for i, item in enumerate(items):
-        new_val = st.session_state.get(f"price_{i}")
-        if not new_val:
-            continue
-        changes.append({
-            "sku":       item["sku"],
-            "kanri_id":  item["管理ID"],
-            "sheet_row": item["sheet_row"],
-            "current":   int(float(item["販売価格"])) if item["販売価格"] else None,
-            "new_price": int(new_val),
-        })
+# 入力された変更内容を毎回計算
+changes = []
+for i, item in enumerate(items):
+    new_val = st.session_state.get(f"price_{i}")
+    if not new_val:
+        continue
+    changes.append({
+        "sku":       item["sku"],
+        "kanri_id":  item["管理ID"],
+        "name":      item["商品名"],
+        "sheet_row": item["sheet_row"],
+        "current":   int(float(item["販売価格"])) if item["販売価格"] else None,
+        "new_price": int(new_val),
+    })
 
+# 実行トリガー判定（ドライランは即実行、本番は確認ステップを挟む）
+run_now = False
+if apply_btn:
     if not changes:
         st.warning("変更金額が入力されている商品がありません。")
+    elif dry_run:
+        run_now = True
     else:
+        st.session_state["price_confirm"] = True
+
+# 本番反映の確認ステップ
+if st.session_state.get("price_confirm") and not dry_run and changes:
+    st.warning(f"⚠️ {len(changes)} 件の出品価格を実際に変更します。内容を確認してください。")
+    for ch in changes:
+        cur = f"{ch['current']:,}円" if ch["current"] else "不明"
+        st.markdown(f"- **{ch['name'][:30]}**　{cur} → **{ch['new_price']:,}円**")
+    cc1, cc2 = st.columns([1, 2])
+    if cc1.button("✅ はい、反映する", type="primary", key="price_confirm_yes"):
+        st.session_state["price_confirm"] = False
+        run_now = True
+    if cc2.button("キャンセル", key="price_confirm_no"):
+        st.session_state["price_confirm"] = False
+        st.rerun()
+
+if run_now:
+    if True:
         st.write(f"対象: {len(changes)} 件")
         log_area = st.empty()
         lines = []
