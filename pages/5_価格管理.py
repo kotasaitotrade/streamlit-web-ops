@@ -141,7 +141,31 @@ if not items:
     st.info("販売中・納品中の商品がありません。")
     st.stop()
 
-st.caption(f"販売中・納品中: {len(items)} 件 | [スプレッドシート]({SUMMARY_SS_URL})")
+# カート獲得状況フィルタ（値下げ対象＝カート未獲得を素早く絞り込む）
+all_items = list(items)   # フィルタ前の全件（反映時はこちらを走査）
+total_n = len(items)
+cart_filter = st.radio(
+    "カート獲得で絞り込み",
+    ["すべて", "✗ 未獲得のみ", "○ 獲得のみ"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="cart_filter",
+)
+if cart_filter == "✗ 未獲得のみ":
+    items = [it for it in items if it["カート獲得"] != "○"]
+elif cart_filter == "○ 獲得のみ":
+    items = [it for it in items if it["カート獲得"] == "○"]
+
+st.caption(f"表示 {len(items)} 件 / 販売中・納品中 {total_n} 件 | [スプレッドシート]({SUMMARY_SS_URL})")
+
+if not items:
+    st.info("条件に一致する商品がありません。フィルタを変更してください。")
+    st.stop()
+
+# 入力した変更金額を行ごとに保持する辞書（フィルタで非表示になっても値が消えないように）
+if "price_inputs" not in st.session_state:
+    st.session_state["price_inputs"] = {}
+price_inputs = st.session_state["price_inputs"]
 
 # ============================================================
 # カード一覧
@@ -172,22 +196,29 @@ for i, item in enumerate(items):
             if item["URL"]:
                 st.link_button("🔗 商品ページを開く", item["URL"], use_container_width=True)
 
-        # 変更金額入力
-        default_val = None
-        try:
-            default_val = int(float(item["変更金額_default"])) if item["変更金額_default"] else None
-        except Exception:
-            pass
+        # 変更金額入力。既入力(price_inputs)を優先し、無ければサマリーP列の値を初期表示
+        row_key = item["sheet_row"]
+        default_val = price_inputs.get(row_key)
+        if default_val is None:
+            try:
+                default_val = int(float(item["変更金額_default"])) if item["変更金額_default"] else None
+            except Exception:
+                default_val = None
 
-        st.number_input(
+        entered = st.number_input(
             "💰 変更金額（円）",
             min_value=1,
             value=default_val,
             step=100,
             placeholder="変更しない場合は空欄のまま",
-            key=f"price_{i}",
+            key=f"price_{row_key}",  # 行固有キー（フィルタで位置が変わってもズレない）
             label_visibility="visible",
         )
+        # 入力値を辞書へ同期（フィルタで非表示になっても保持される）
+        if entered:
+            price_inputs[row_key] = int(entered)
+        else:
+            price_inputs.pop(row_key, None)
 
 st.divider()
 
@@ -205,10 +236,10 @@ apply_btn = c2.button(
 if not dry_run:
     st.warning("⚠️ 本番モード: Amazonの出品価格を実際に変更します。")
 
-# 入力された変更内容を毎回計算
+# 入力された変更内容を毎回計算（price_inputs辞書から全件走査。フィルタ非表示分も拾う）
 changes = []
-for i, item in enumerate(items):
-    new_val = st.session_state.get(f"price_{i}")
+for item in all_items:
+    new_val = price_inputs.get(item["sheet_row"])
     if not new_val:
         continue
     changes.append({
