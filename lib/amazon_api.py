@@ -224,6 +224,31 @@ _COLOR_MAP = {
 
 _INVALID_KW = {"商品名取得失敗", "メルカリで出す", "充電出来ない", "リモコンの方"}
 
+# L列(仕入れ特記事項)が「商品名」ではなく作業依頼メモのときに含まれる語。
+# これが含まれる場合は L列で検索せず U列(型番など)を検索に使う。
+_REQUEST_KW = ("お願い", "おねがい", "写真", "メモ", "年製", "教えて", "確認して")
+
+
+def _is_request_note(text: str) -> bool:
+    """『年製がわかる写真かメモをお願いします』等、商品名でない依頼メモかを判定。"""
+    return bool(text) and any(kw in text for kw in _REQUEST_KW)
+
+
+# 型番が一致しても「アクセサリ・互換品」を本体と誤採用しないための除外語。
+# 例: 'HAC-001 対応 バッテリー' は型番HAC-001を含むが本体ではない。
+_ACCESSORY_KW = (
+    "対応", "互換", "交換用", "ケース", "カバー", "フィルム", "保護", "バッテリー",
+    "充電", "ケーブル", "ストラップ", "スタンド", "ガラス", "ホルダー", "グリップ",
+    "シール", "アダプタ", "コネクタ", "収納", "ラバー",
+    # バンドル/同梱版（中古再販は単体が大半。同梱版は別物として除外）
+    "バリューパック", "バリュー・パック", "同梱", "ギフトパック", "ギフトセット",
+)
+
+
+def _is_accessory_title(name: str) -> bool:
+    """商品名がアクセサリ・互換品・同梱版らしいか（本体単体でない可能性が高いか）を判定。"""
+    return bool(name) and any(kw in name for kw in _ACCESSORY_KW)
+
 
 def _build_queries(text: str) -> list[str]:
     if not text or text.strip() in _INVALID_KW or len(text.strip()) < 3:
@@ -284,11 +309,21 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
         asin = _cell(row, COL_ASIN)
         if asin:
             continue
-        # ASIN が空の行のみ対象。仕入れ特記事項(L) → 無ければ 型番など(U)
-        note = _cell(row, COL_SHIIRE_NOTE) or _cell(row, COL_MODEL_NOTE)
-        if not note or note in _INVALID_KW:
+        # ASIN が空の行のみ対象。
+        l_note = _cell(row, COL_SHIIRE_NOTE)   # L列: 仕入れ特記事項（商品名・型番）
+        u_note = _cell(row, COL_MODEL_NOTE)    # U列: 型番など
+        # L列が「依頼メモ」（例: 年製がわかる写真かメモをお願いします）なら U列を検索に使う
+        if l_note and not _is_request_note(l_note):
+            search_note = l_note
+        elif u_note:
+            search_note = u_note
+        else:
+            search_note = l_note
+        if not search_note or search_note in _INVALID_KW:
             continue
-        targets.append((sheet_row, _cell(row, COL_KANRI_ID), note))
+        # 型番抽出は L+U 両方から（依頼メモでも U列の型番を拾えるように）
+        model_src = f"{l_note} {u_note}".strip()
+        targets.append((sheet_row, _cell(row, COL_KANRI_ID), search_note, model_src))
 
     yield f"対象: {len(targets)} 件"
     if not targets:
@@ -298,10 +333,11 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
     api = CatalogItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
     written = rejected = notfound = 0
 
-    for sheet_row, kanri_id, note_raw in targets:
+    for sheet_row, kanri_id, note_raw, model_src in targets:
         yield f"[{kanri_id}] 検索: {note_raw[:50]}"
         queries = _build_queries(note_raw)
-        models = _extract_models(note_raw)
+        # 型番は検索クエリ＋型番ソース(L+U)の両方から抽出
+        models = list(dict.fromkeys(_extract_models(note_raw) + _extract_models(model_src)))
         norm_models = [_normalize_model(m) for m in models]
 
         match_asin = match_name = None   # 型番一致した候補
@@ -330,12 +366,12 @@ def run_asin_lookup(dry_run: bool = False, spreadsheet_id=None):
                 cand_asin = items[0].get("asin")
                 cand_name = items[0].get("summaries", [{}])[0].get("itemName", "")
 
-            # 型番一致を優先して探す（返ってきた商品名に型番が含まれるか）
+            # 型番一致を優先して探す（返ってきた商品名に型番が含まれ、かつアクセサリでない）
             if norm_models:
                 for it in items:
                     nm = it.get("summaries", [{}])[0].get("itemName", "")
                     nm_norm = _normalize_model(nm)
-                    if any(m in nm_norm for m in norm_models):
+                    if any(m in nm_norm for m in norm_models) and not _is_accessory_title(nm):
                         match_asin = it.get("asin")
                         match_name = nm
                         break
