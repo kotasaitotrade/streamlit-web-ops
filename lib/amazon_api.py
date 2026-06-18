@@ -948,9 +948,9 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
 
 
 def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str = None, management_spreadsheet_id=None):
-    """generator: サマリーシートのO列（最低販売価格）に入力された値をAmazon出品価格に反映する。
+    """generator: サマリーシートのP列（変更金額）に入力された値をAmazon出品価格に反映する。
 
-    - A列(SKU) と O列(最低販売価格) を読む
+    - A列(SKU) と P列(変更金額) を読む（_SCOL_CHANGE_PRICE=15）
     - ステータスが販売中/納品中の行が対象（B列で判定）
     - dry_run=True のときはログのみ（実際の変更なし）
     - 変更後は G列（販売価格）も書き戻す
@@ -993,9 +993,9 @@ def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str
             "new_price":   new_price,
         })
 
-    yield f"対象: {len(targets)} 件（販売中/納品中 かつ O列入力済み）"
+    yield f"対象: {len(targets)} 件（販売中/納品中 かつ P列(変更金額)入力済み）"
     if not targets:
-        yield "対象なし。O列（最低販売価格）に金額を入力してください。"
+        yield "対象なし。P列（変更金額）に金額を入力してください。"
         return
 
     from sp_api.base import Marketplaces
