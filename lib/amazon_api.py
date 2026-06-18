@@ -646,7 +646,9 @@ def _decide_buybox_target(a: dict, current: int, step: int, raise_step: int,
         elif fbm is not None:
             ceiling = int(fbm * (1 + fbm_premium))       # FBMのみ→上に乗せられる
         else:
-            ceiling = current + raise_step               # 競合なし
+            # 競合なし → 上限の基準がなく、毎サイクル上げ続けると価格が暴騰し
+            # カート抑制(buy box suppression)で売れなくなる恐れ。維持する。
+            return current, f"カート保持・競合なし→維持({current:,}円)"
         target = min(current + raise_step, ceiling)
         if target <= current:
             return current, f"カート保持・値上げ余地なし→維持({current:,}円)"
