@@ -2073,10 +2073,125 @@ _SUMMARY_HEADERS = [
 # 列インデックス（0始まり）
 _SCOL_SKU          = 0   # A
 _SCOL_STATUS       = 1   # B
+_SCOL_NAME         = 2   # C: 商品名
 _SCOL_COND         = 5   # F
 _SCOL_HANBAI       = 6   # G
+_SCOL_CART         = 7   # H: カート獲得（○/△/✗）
+_SCOL_CART_PRICE   = 8   # I: カート価格
 _SCOL_FBA_MIN      = 14  # O: 同コンFBA最低金額（同コンディション・FBA最安値）
 _SCOL_CHANGE_PRICE = 15  # P: 変更金額（ユーザーが設定する変更後価格）
+
+_CART_HISTORY_SHEET = "カート履歴"
+_CART_HISTORY_HEADERS = ["日時", "対象数", "○獲得", "△", "✗未獲得", "獲得率%"]
+
+
+def _discord_webhook_url():
+    """Discord Webhook URL を環境変数 or st.secrets から取得（未設定なら None）。"""
+    import os
+    url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if url:
+        return url
+    try:
+        return st.secrets["discord"]["webhook_url"]
+    except Exception:
+        return None
+
+
+def _post_discord(content: str) -> bool:
+    """Discord Webhook にメッセージを投稿。未設定/失敗時は False。"""
+    url = _discord_webhook_url()
+    if not url:
+        return False
+    try:
+        import json as _json
+        import urllib.request
+        data = _json.dumps({"content": content[:1900]}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15)
+        return True
+    except Exception:
+        return False
+
+
+def _append_cart_history(svc, ss_id: str, row: list):
+    """カート履歴タブに1行追記する（タブが無ければ作成しヘッダーを付ける）。"""
+    try:
+        svc.spreadsheets().values().append(
+            spreadsheetId=ss_id, range=f"{_CART_HISTORY_SHEET}!A1",
+            valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+            body={"values": [row]},
+        ).execute()
+    except Exception:
+        # タブ未作成 → 作成してヘッダー＋1行目を書く
+        try:
+            svc.spreadsheets().batchUpdate(
+                spreadsheetId=ss_id,
+                body={"requests": [{"addSheet": {"properties": {"title": _CART_HISTORY_SHEET}}}]},
+            ).execute()
+            svc.spreadsheets().values().update(
+                spreadsheetId=ss_id, range=f"{_CART_HISTORY_SHEET}!A1",
+                valueInputOption="USER_ENTERED",
+                body={"values": [_CART_HISTORY_HEADERS, row]},
+            ).execute()
+        except Exception:
+            pass
+
+
+def get_cart_dashboard_data(summary_spreadsheet_id: str) -> dict:
+    """カート獲得ダッシュボード用データを返す。
+    返り値: won/partial/lost/rate, near(あと一歩で獲得=✗だが僅差, gap昇順), history(獲得率推移)"""
+    svc = _sheets_service()
+    res = {"won": 0, "partial": 0, "lost": 0, "rate": 0.0, "near": [], "history": []}
+
+    def _num(v):
+        try:
+            return int(float(str(v).replace(",", "").replace("¥", "").strip()))
+        except Exception:
+            return None
+
+    try:
+        rows = svc.spreadsheets().values().get(
+            spreadsheetId=summary_spreadsheet_id, range="商品一覧!A2:P5000",
+        ).execute().get("values", [])
+    except Exception:
+        rows = []
+
+    for r in rows:
+        status = r[_SCOL_STATUS] if len(r) > _SCOL_STATUS else ""
+        if status not in ("販売中", "納品中"):
+            continue
+        bb = r[_SCOL_CART].strip() if len(r) > _SCOL_CART and r[_SCOL_CART] else ""
+        if bb == "○":
+            res["won"] += 1
+        elif bb == "△":
+            res["partial"] += 1
+        elif bb == "✗":
+            res["lost"] += 1
+        else:
+            continue
+        if bb == "✗":
+            price = _num(r[_SCOL_HANBAI]) if len(r) > _SCOL_HANBAI else None
+            cart  = _num(r[_SCOL_CART_PRICE]) if len(r) > _SCOL_CART_PRICE else None
+            if price is not None and cart is not None and price > cart:
+                res["near"].append({
+                    "name":  (str(r[_SCOL_NAME])[:40] if len(r) > _SCOL_NAME else ""),
+                    "sku":   (r[_SCOL_SKU] if len(r) > _SCOL_SKU else ""),
+                    "price": price, "cart": cart, "gap": price - cart,
+                })
+
+    total = res["won"] + res["partial"] + res["lost"]
+    res["rate"] = round(res["won"] / total * 100, 1) if total else 0.0
+    res["near"].sort(key=lambda x: x["gap"])
+    res["near"] = res["near"][:15]
+
+    try:
+        res["history"] = svc.spreadsheets().values().get(
+            spreadsheetId=summary_spreadsheet_id, range=f"{_CART_HISTORY_SHEET}!A2:F2000",
+        ).execute().get("values", [])
+    except Exception:
+        pass
+    return res
 
 
 def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
@@ -2466,6 +2581,19 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
     # ── Step 6: スプレッドシート書き込み ────────────────────────────────
     try:
+        # C: クリア前に前回のカート状況(SKU→○/△/✗)を読む（差分でカート喪失を検知）
+        prev_cart = {}
+        if out_spreadsheet_id:
+            try:
+                _old = svc.spreadsheets().values().get(
+                    spreadsheetId=out_spreadsheet_id, range="商品一覧!A2:H5000",
+                ).execute().get("values", [])
+                for _r in _old:
+                    if _r and len(_r) > _SCOL_CART and _r[_SCOL_SKU].strip():
+                        prev_cart[_r[_SCOL_SKU].strip()] = _r[_SCOL_CART].strip()
+            except Exception:
+                pass
+
         if out_spreadsheet_id:
             ss_id  = out_spreadsheet_id
             ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
@@ -2524,6 +2652,44 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
         yield f"完了！ {len(all_rows)} 件を書き込みました"
         yield f"URL: {ss_url}"
+
+        # ── C/D: カート喪失検知 → Discord通知 ＋ 履歴追記（失敗しても本処理は止めない）──
+        try:
+            won = partial = lost = 0
+            losses = []
+            for row in all_rows:
+                bb = row[_SCOL_CART]
+                if bb == "○":
+                    won += 1
+                elif bb == "△":
+                    partial += 1
+                elif bb == "✗":
+                    lost += 1
+                else:
+                    continue
+                # 前回○ → 今回○でない＝カート喪失
+                if prev_cart.get(row[_SCOL_SKU]) == "○" and bb != "○":
+                    losses.append(row)
+
+            if losses:
+                lines = [f"⚠️ **カート喪失アラート**（{len(losses)} 件）"]
+                for row in losses[:20]:
+                    nm = str(row[_SCOL_NAME])[:30]
+                    lines.append(
+                        f"・{nm}  販売¥{row[_SCOL_HANBAI]} / カート¥{row[_SCOL_CART_PRICE]}  (SKU {row[_SCOL_SKU]})")
+                if len(losses) > 20:
+                    lines.append(f"…ほか {len(losses) - 20} 件")
+                sent = _post_discord("\n".join(lines))
+                yield (f"🔔 カート喪失 {len(losses)} 件"
+                       + ("（Discord通知済み）" if sent else "（Discord未設定のため通知スキップ）"))
+
+            # D: カート履歴に1行追記（獲得率の推移用）
+            total_cart = won + partial + lost
+            rate = round(won / total_cart * 100, 1) if total_cart else 0.0
+            now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+            _append_cart_history(svc, ss_id, [now_jst, total_cart, won, partial, lost, rate])
+        except Exception:
+            pass
     except Exception as e:
         import traceback
         yield f"❌ 書き込みエラー: {e}"

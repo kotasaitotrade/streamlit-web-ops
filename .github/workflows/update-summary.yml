@@ -36,4 +36,5 @@ jobs:
           SP_REFRESH_TOKEN:     ${{ secrets.SP_REFRESH_TOKEN }}
           SP_SELLER_ID:         ${{ secrets.SP_SELLER_ID }}
           SP_MARKETPLACE_ID:    ${{ secrets.SP_MARKETPLACE_ID }}
+          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}  # 任意: 設定するとカート喪失を通知
         run: python scripts/ci_update_summary.py

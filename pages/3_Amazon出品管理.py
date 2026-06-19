@@ -726,6 +726,68 @@ with tab6:
     st.markdown(
         f"出力先: **[商品一覧スプレッドシート]({SUMMARY_SS_URL})**"
     )
+
+    # ── 🛒 カート獲得ダッシュボード（D）──────────────────────
+    st.markdown("### 🛒 カート獲得ダッシュボード")
+
+    @st.cache_data(ttl=120)
+    def _load_cart_dashboard():
+        return amazon.get_cart_dashboard_data(SUMMARY_SS_ID)
+
+    cda, cdb = st.columns([3, 1])
+    with cdb:
+        if st.button("🔄 今すぐ更新", key="dash_refresh", use_container_width=True,
+                     help="最新のサマリーをAmazonから取得して反映します（数分）"):
+            log_dash = st.empty()
+            lines_d = []
+            try:
+                with st.spinner("Amazonから最新データを取得中...（数分）"):
+                    for msg in amazon.run_create_summary_sheet(SUMMARY_SS_ID):
+                        lines_d.append(msg)
+                        log_dash.markdown(
+                            '<div class="log-box">' + "\n".join(lines_d[-30:]) + "</div>",
+                            unsafe_allow_html=True)
+                _load_cart_dashboard.clear()
+                st.success("✅ 更新しました")
+            except Exception as e:
+                st.error(f"❌ 取得に失敗しました: {e}")
+
+    try:
+        dash = _load_cart_dashboard()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("カート獲得率", f"{dash['rate']}%")
+        m2.metric("○ 獲得", dash["won"])
+        m3.metric("△ 新品優先", dash["partial"])
+        m4.metric("✗ 未獲得", dash["lost"])
+
+        if dash["near"]:
+            st.markdown("**🎯 あと一歩でカート獲得（✗のうち、カート価格との差が小さい順）**")
+            st.caption("「差額」だけ値下げすればカート獲得が狙えます。価格管理ページで調整できます。")
+            import pandas as _pd
+            near_df = _pd.DataFrame([{
+                "商品名": n["name"],
+                "現在価格": f"¥{n['price']:,}",
+                "カート価格": f"¥{n['cart']:,}",
+                "差額": f"¥{n['gap']:,}",
+            } for n in dash["near"]])
+            st.dataframe(near_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("「あと一歩」のSKUはありません（✗かつカート価格より高い商品なし）。")
+
+        if dash["history"] and len(dash["history"]) >= 2:
+            import pandas as _pd
+            hist_df = _pd.DataFrame(dash["history"], columns=amazon._CART_HISTORY_HEADERS[:6])
+            try:
+                hist_df["獲得率%"] = _pd.to_numeric(hist_df["獲得率%"], errors="coerce")
+                st.markdown("**📈 獲得率の推移**")
+                st.line_chart(hist_df.set_index("日時")["獲得率%"], height=200)
+            except Exception:
+                pass
+        else:
+            st.caption("📈 推移グラフは履歴が2回分たまると表示されます（毎時更新で蓄積）。")
+    except Exception as e:
+        st.warning(f"ダッシュボードの読み込みに失敗しました: {e}")
+
     st.divider()
 
     # ── ① サマリー更新 ──────────────────────────────────────
