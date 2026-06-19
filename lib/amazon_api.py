@@ -2107,7 +2107,13 @@ def _post_discord(content: str) -> bool:
         import urllib.request
         data = _json.dumps({"content": content[:1900]}).encode("utf-8")
         req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"})
+            url, data=data,
+            headers={
+                "Content-Type": "application/json",
+                # Discord(Cloudflare)は User-Agent 無しのリクエストを403で拒否するため必須
+                "User-Agent": "sedori-tool-webhook/1.0",
+            },
+        )
         urllib.request.urlopen(req, timeout=15)
         return True
     except Exception:
@@ -2679,9 +2685,12 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                         f"・{nm}  販売¥{row[_SCOL_HANBAI]} / カート¥{row[_SCOL_CART_PRICE]}  (SKU {row[_SCOL_SKU]})")
                 if len(losses) > 20:
                     lines.append(f"…ほか {len(losses) - 20} 件")
-                sent = _post_discord("\n".join(lines))
-                yield (f"🔔 カート喪失 {len(losses)} 件"
-                       + ("（Discord通知済み）" if sent else "（Discord未設定のため通知スキップ）"))
+                if _discord_webhook_url():
+                    sent = _post_discord("\n".join(lines))
+                    note = "（Discord通知済み）" if sent else "（Discord送信失敗）"
+                else:
+                    note = "（Discord未設定のため通知スキップ）"
+                yield f"🔔 カート喪失 {len(losses)} 件{note}"
 
             # D: カート履歴に1行追記（獲得率の推移用）
             total_cart = won + partial + lost
