@@ -325,8 +325,7 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
     st.divider()
     st.subheader("🛒 カート連動リプライサー（NEW）")
     st.markdown("""
-カート(BuyBox)の獲得状況に応じて賢い価格を計算し、**サマリーの「変更金額」(P列)に書き込みます**。
-**Amazonの価格は直接変えません**。書き込み後、**価格管理ページで確認 → 反映**してください（安全な2段階）。
+カート(BuyBox)の獲得状況に応じて賢い価格を計算します（サマリー起点）。
 
 | 状況 | 計算される価格 |
 |---|---|
@@ -334,52 +333,60 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
 | **カート未取得・競合FBA** | カート価格を**下回って奪取** |
 | **カート未取得・競合FBM** | FBAの強みで**同値〜やや上**で奪取（安売りしない） |
 
-下限は **AE列（最低販売価格）**。空欄なら現在価格を下限（＝値下げしない）。
+**自動反映 ±%** … 変更幅がこの%以内の小さい調整は**自動でAmazon反映**。
+超える大きい変更は**変更金額(P列)に退避** → 価格管理ページで確認して反映（安全）。
+**0にすると全件 変更金額(P列)へ**（Amazon非変更）。下限はAE列（空欄＝現在価格）。
 """)
-    cb1, cb2, cb3, cb4 = st.columns([1, 1, 1, 1])
+    cb1, cb2, cb3, cb4, cb5 = st.columns([1, 1, 1, 1, 1])
     with cb1:
         dry_bb = st.checkbox("ドライラン", value=True, key="dry_bb")
     with cb2:
         step_bb = st.number_input(
             "奪取きざみ(円)", min_value=1, max_value=1000, value=10, step=1, key="step_bb",
-            help="カート未取得のとき、競合（カート価格やFBA最安）を何円下回るか。大きいほど取りやすいが安くなる。",
+            help="カート未取得のとき、競合（カート価格やFBA最安）を何円下回るか。",
         )
     with cb3:
         raise_bb = st.number_input(
             "値上げきざみ(円)", min_value=1, max_value=5000, value=50, step=10, key="raise_bb",
-            help="カート保持中に1回の実行で何円ずつ上げるか。大きいほど早く上がるが落ちやすい。",
+            help="カート保持中に1回で何円ずつ上げるか。",
         )
     with cb4:
         prem_bb = st.number_input(
             "FBM上乗せ(%)", min_value=0, max_value=50, value=5, step=1, key="prem_bb",
-            help="競合がFBM（自社発送）だけのとき、FBA優位を活かしてFBM最安より何%まで上に乗せるか。",
+            help="競合がFBMだけのとき、FBM最安より何%まで上に乗せるか。",
         )
-    st.caption("ℹ️ ここでは **変更金額(P列)に書き込むだけ**。Amazonへの反映は価格管理ページで確認後に行います。")
+    with cb5:
+        auto_bb = st.number_input(
+            "自動反映 ±%", min_value=0, max_value=50, value=10, step=1, key="auto_bb",
+            help="変更幅がこの%以内なら自動でAmazon反映。超えたら変更金額(P列)へ退避。0=全件P列へ（Amazon非変更）。",
+        )
     if not dry_bb:
-        st.warning("⚠️ サマリーの「変更金額」(P列)を上書きします（既存の変更金額は置き換わります）。Amazonはまだ変わりません。")
+        if auto_bb > 0:
+            st.warning(f"⚠️ 変更幅 ±{int(auto_bb)}% 以内は**実際にAmazon出品価格を変更**します。超える分は変更金額(P列)へ退避。")
+        else:
+            st.warning("⚠️ 全件を変更金額(P列)に書き込みます（Amazonは変更しません）。")
 
     do_bb = st.button(
-        "▶ ドライラン（変更金額へどう入るか確認）" if dry_bb else "▶ 変更金額(P列)に書き込む",
+        "▶ ドライラン（どう振り分けられるか確認）" if dry_bb else "▶ 実行する",
         key="run_bb", type="secondary" if dry_bb else "primary",
     )
 
     if do_bb:
         log_area_bb = st.empty()
-        label_bb = "ドライラン" if dry_bb else "書き込み"
+        label_bb = "ドライラン" if dry_bb else "実行"
         try:
             with st.spinner(f"カート連動リプライス計算中 [{label_bb}]... (1件あたり約1〜2秒)"):
                 _stream_logs(
                     amazon.run_buybox_reprice(
                         dry_run=dry_bb, step_yen=int(step_bb), raise_step=int(raise_bb),
                         fbm_premium=float(prem_bb) / 100.0, spreadsheet_id=ss_id,
-                        summary_spreadsheet_id=SUMMARY_SS_ID,
+                        summary_spreadsheet_id=SUMMARY_SS_ID, auto_apply_pct=float(auto_bb),
                     ),
                     log_area_bb,
                 )
-            if dry_bb:
-                st.success("✅ ドライラン完了。チェックを外して「変更金額(P列)に書き込む」を押すと書き込みます。")
-            else:
-                st.success("✅ 変更金額(P列)に書き込みました。価格管理ページで確認→反映してください。")
+            st.success("✅ 完了しました（ドライランは反映なし）。退避分は価格管理ページで確認→反映してください。")
+            if not dry_bb:
+                _get_status_counts.clear()
         except Exception as e:
             st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
@@ -739,6 +746,40 @@ with tab6:
                 st.success("✅ 更新しました")
             except Exception as e:
                 st.error(f"❌ 取得に失敗しました: {e}")
+
+    # ── ⚡ カート最適化（1クリック実行）──
+    with st.container(border=True):
+        oc1, oc2, oc3 = st.columns([2, 1, 1])
+        oc1.markdown("**⚡ カート最適化**\nカートロジックで価格を計算して最適化します。")
+        opt_pct = oc2.number_input("自動反映 ±%", min_value=0, max_value=50, value=10, step=1,
+                                   key="opt_pct",
+                                   help="この%以内の小さい変更は自動でAmazon反映。超える分は変更金額(P列)へ退避し価格管理ページで確認。0=全件P列へ。")
+        if oc3.button("▶ 最適化を実行", key="run_opt", type="primary", use_container_width=True):
+            st.session_state["confirm_opt"] = True
+        if st.session_state.get("confirm_opt"):
+            if opt_pct > 0:
+                st.warning(f"⚠️ 変更幅 ±{int(opt_pct)}% 以内は**実際にAmazon価格を変更**します（超える分は変更金額へ退避）。実行しますか？")
+            else:
+                st.warning("⚠️ 全件を変更金額(P列)に書き込みます（Amazonは変更しません）。実行しますか？")
+            o1, o2 = st.columns([1, 2])
+            if o1.button("✅ はい、実行", type="primary", key="confirm_opt_yes"):
+                st.session_state["confirm_opt"] = False
+                log_opt = st.empty()
+                try:
+                    with st.spinner("カート最適化を実行中...（1件あたり約1〜2秒）"):
+                        _stream_logs(
+                            amazon.run_buybox_reprice(
+                                dry_run=False, summary_spreadsheet_id=SUMMARY_SS_ID,
+                                auto_apply_pct=float(opt_pct),
+                            ),
+                            log_opt,
+                        )
+                    _load_cart_dashboard.clear()
+                    st.success("✅ 完了。退避分があれば価格管理ページで確認→反映してください。")
+                except Exception as e:
+                    st.error(f"❌ エラー: {e}")
+            if o2.button("キャンセル", key="confirm_opt_no"):
+                st.session_state["confirm_opt"] = False
 
     try:
         dash = _load_cart_dashboard()

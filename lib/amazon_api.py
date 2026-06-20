@@ -819,16 +819,19 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
 
 def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int = 50,
                        fbm_premium: float = 0.05, spreadsheet_id=None,
-                       summary_spreadsheet_id=None):
+                       summary_spreadsheet_id=None, auto_apply_pct: float = 0):
     """generator: カート(BuyBox)連動リプライサー。
 
     - カート保持中(○) → カートを保てる範囲で少しずつ値上げ（利益最大化）
     - カート未取得(✗)  → 競合がFBMなら同値、FBAならカート価格を下回って奪取
     AE列(最低販売価格)を下限とする（空なら現在価格＝値下げしない）。
 
-    summary_spreadsheet_id を指定すると、Amazonを直接変更せず、計算した価格を
-    サマリーシートの「変更金額(P列)」に書き込む（価格管理ページで確認→反映する運用）。
-    指定しない場合は従来どおりAmazon出品価格を直接変更する。
+    summary_spreadsheet_id を指定すると、サマリーシート(商品一覧)を起点に計算する。
+      - auto_apply_pct=0 → 計算結果を「変更金額(P列)」に書き込むだけ（Amazon非変更）。
+        価格管理ページで確認→反映する運用。
+      - auto_apply_pct>0 → 変更幅が ±auto_apply_pct% 以内の小さい変更は自動でAmazon
+        反映（販売価格Gも更新）。それを超える大きい変更は変更金額(P列)へ退避して要確認。
+    summary_spreadsheet_id を指定しない場合は従来どおりAmazon出品価格を直接変更する。
     """
     from sp_api.api import ListingsItems, Products
     from sp_api.base import Marketplaces
@@ -906,10 +909,13 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
         return
 
     products_api = Products(credentials=_sp_creds(), marketplace=Marketplaces.JP)
-    listings_api = None if (dry_run or to_summary) else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    # Amazon直接変更が要るのは: 従来モード or サマリーモードで自動反映ありのとき
+    _need_listings = (not dry_run) and (not to_summary or auto_apply_pct > 0)
+    listings_api = ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP) if _need_listings else None
 
     offers_cache: dict[str, dict | None] = {}
     raised = took = held = skipped = failed = 0
+    auto_applied = queued = 0   # サマリーモード用: 自動反映 / 変更金額へ退避
 
     for t in targets:
         floor_label = f"{t['floor']:,}円(手動)" if t["floor_manual"] else f"{t['floor']:,}円(現在価格)"
@@ -960,18 +966,40 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
         going_up = target > t["current"]
         arrow = "⤴値上げ" if going_up else "⤵奪取"
 
-        # ── サマリーの変更金額(P列)に書き込むモード（Amazonは触らない）──
+        # ── サマリーモード: ±しきい%以内は自動Amazon反映、超過は変更金額(P)へ退避 ──
         if to_summary:
             srow = t["summary_row"]
-            if dry_run:
-                yield f"  → [ドライラン] 変更金額(P{srow})に {target:,}円 を書込予定 {arrow}"
+            pct = abs(target - t["current"]) / max(t["current"], 1) * 100
+            auto = auto_apply_pct > 0 and pct <= auto_apply_pct
+            if auto:
+                if dry_run:
+                    yield f"  → [ドライラン] 変更{pct:.1f}%≤{auto_apply_pct:.0f}% → 自動Amazon反映予定 {t['current']:,}→{target:,}円 {arrow}"
+                    auto_applied += 1
+                else:
+                    try:
+                        listings_api.patch_listings_item(
+                            sellerId=_seller_id(), sku=t["sku"],
+                            marketplaceIds=[_marketplace_id()],
+                            body={"productType": "PRODUCT",
+                                  "patches": [{"op": "replace", "path": "/attributes/purchasable_offer",
+                                               "value": [{"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(target)}]}]}]}]},
+                        )
+                        summary_writes.append(("G", srow, target))   # 販売価格を更新
+                        yield f"  → ✅自動Amazon反映({pct:.1f}%) {t['current']:,}→{target:,}円 {arrow}"
+                        auto_applied += 1
+                        time.sleep(1)
+                    except Exception as e:
+                        summary_writes.append(("P", srow, target))   # 失敗時は変更金額へ退避
+                        yield f"  → 自動反映エラー: {e}（変更金額に退避）"
+                        failed += 1
             else:
-                summary_writes.append((srow, target))
-                yield f"  → 変更金額(P{srow})に {target:,}円 を書込 {arrow}"
-            if going_up:
-                raised += 1
-            else:
-                took += 1
+                if dry_run:
+                    why = f"変更{pct:.1f}%>{auto_apply_pct:.0f}%" if auto_apply_pct > 0 else "確認用"
+                    yield f"  → [ドライラン] {why} → 変更金額(P{srow})へ {target:,}円（要確認）{arrow}"
+                else:
+                    summary_writes.append(("P", srow, target))
+                    yield f"  → 変更金額(P{srow})へ {target:,}円（要確認）{arrow}"
+                queued += 1
             time.sleep(0.2)
             continue
 
@@ -1006,21 +1034,23 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
             failed += 1
         time.sleep(1)
 
-    # サマリー書き込みモード: 変更金額(P列)へまとめて書き込み
+    # サマリーモード: 販売価格(G)・変更金額(P)へまとめて書き込み
     if to_summary and summary_writes and not dry_run:
         try:
-            data = [{"range": f"商品一覧!P{srow}", "values": [[str(tp)]]}
-                    for srow, tp in summary_writes]
+            data = [{"range": f"商品一覧!{col}{srow}", "values": [[str(v)]]}
+                    for col, srow, v in summary_writes]
             _sheets_service().spreadsheets().values().batchUpdate(
                 spreadsheetId=summary_spreadsheet_id,
                 body={"valueInputOption": "RAW", "data": data},
             ).execute()
-            yield f"📝 変更金額(P列)に {len(summary_writes)} 件 書き込みました（価格管理ページで確認→反映してください）"
         except Exception as e:
-            yield f"❌ 変更金額の書き込みに失敗: {e}"
+            yield f"❌ サマリーへの書き込みに失敗: {e}"
 
     if to_summary:
-        yield f"完了: 変更金額に書込 {raised + took} 件（値上げ{raised}/奪取{took}）/ 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+        msg = f"完了: 自動Amazon反映 {auto_applied} 件 / 変更金額に退避(要確認) {queued} 件 / 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+        yield msg
+        if queued and not dry_run:
+            yield "📝 「変更金額に退避」分は価格管理ページで確認→反映してください"
     else:
         yield f"完了: 値上げ {raised} 件 / 奪取(値下げ) {took} 件 / 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
 
