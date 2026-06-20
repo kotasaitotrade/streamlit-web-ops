@@ -818,55 +818,95 @@ def run_auto_reprice(dry_run: bool = True, step_yen: int = 10, spreadsheet_id=No
 
 
 def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int = 50,
-                       fbm_premium: float = 0.05, spreadsheet_id=None):
+                       fbm_premium: float = 0.05, spreadsheet_id=None,
+                       summary_spreadsheet_id=None):
     """generator: カート(BuyBox)連動リプライサー。
 
     - カート保持中(○) → カートを保てる範囲で少しずつ値上げ（利益最大化）
     - カート未取得(✗)  → 競合がFBMなら同値、FBAならカート価格を下回って奪取
     AE列(最低販売価格)を下限とする（空なら現在価格＝値下げしない）。
-    毎時サマリー更新と組み合わせ「上げて落ちたら次サイクルで下げ戻す」探り運用が前提。
+
+    summary_spreadsheet_id を指定すると、Amazonを直接変更せず、計算した価格を
+    サマリーシートの「変更金額(P列)」に書き込む（価格管理ページで確認→反映する運用）。
+    指定しない場合は従来どおりAmazon出品価格を直接変更する。
     """
     from sp_api.api import ListingsItems, Products
     from sp_api.base import Marketplaces
 
-    yield "スプレッドシート読み込み中..."
-    all_rows = _read_rows("AE", spreadsheet_id)
+    summary_writes = []   # [(summary_row, target), ...] を最後にまとめて書き込む
+    to_summary = bool(summary_spreadsheet_id)
 
     targets = []
-    for sheet_row, row in all_rows:
-        if _cell(row, COL_STATUS) != "3.出品済み":
-            continue
-        asin      = _cell(row, COL_ASIN)
-        sku       = _cell(row, COL_SKU)
-        price_str = _cell(row, COL_HANBAI)
-        state     = _cell(row, COL_STATE)
-        min_str   = _cell(row, COL_MIN_PRICE)
-        if not asin or not sku or not price_str:
-            continue
+    if to_summary:
+        # ── サマリー駆動: 商品一覧シートを起点にする（価格管理ページと同じ行・SKU）──
+        yield "サマリーシート読み込み中..."
+        _SUM_COND = {"非常に良い": "very_good", "非常良い": "very_good", "良い": "good",
+                     "可": "acceptable", "ほぼ新品": "mint", "新品": "new"}
         try:
-            current = int(float(price_str.replace(",", "").replace("¥", "")))
-        except ValueError:
-            continue
-        try:
-            floor = int(float(min_str.replace(",", ""))) if min_str else current
-        except ValueError:
-            floor = current
-        ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
-        sub_cond = _SUBCONDITION_MAP.get(ct, "good")
-        targets.append({
-            "sheet_row": sheet_row, "kanri_id": _cell(row, COL_KANRI_ID),
-            "asin": asin, "sku": sku, "current": current,
-            "floor": floor, "floor_manual": bool(min_str), "sub_condition": sub_cond,
-        })
+            srows = _sheets_service().spreadsheets().values().get(
+                spreadsheetId=summary_spreadsheet_id, range="商品一覧!A2:Q5000",
+            ).execute().get("values", [])
+        except Exception as e:
+            yield f"❌ サマリーシートの読み込みに失敗: {e}"
+            return
+        for i, row in enumerate(srows, start=2):
+            def c(idx, r=row):
+                return r[idx].strip() if idx < len(r) and r[idx] else ""
+            if c(_SCOL_STATUS) not in ("販売中", "納品中"):
+                continue
+            sku = c(_SCOL_SKU)
+            asin = c(16)  # Q列: ASIN
+            price_str = c(_SCOL_HANBAI)
+            if not sku or not asin or not price_str:
+                continue
+            try:
+                current = int(float(price_str.replace(",", "").replace("¥", "")))
+            except ValueError:
+                continue
+            sub_cond = _SUM_COND.get(c(_SCOL_COND), "good")
+            targets.append({
+                "sheet_row": None, "summary_row": i, "kanri_id": _kanri_id_from_sku(sku) or sku,
+                "asin": asin, "sku": sku, "current": current,
+                "floor": current, "floor_manual": False, "sub_condition": sub_cond,
+            })
+    else:
+        # ── 従来: 管理シート(3.出品済み)を起点にAmazon直接変更 ──
+        yield "スプレッドシート読み込み中..."
+        all_rows = _read_rows("AE", spreadsheet_id)
+        for sheet_row, row in all_rows:
+            if _cell(row, COL_STATUS) != "3.出品済み":
+                continue
+            asin      = _cell(row, COL_ASIN)
+            sku       = _cell(row, COL_SKU)
+            price_str = _cell(row, COL_HANBAI)
+            state     = _cell(row, COL_STATE)
+            min_str   = _cell(row, COL_MIN_PRICE)
+            if not asin or not sku or not price_str:
+                continue
+            try:
+                current = int(float(price_str.replace(",", "").replace("¥", "")))
+            except ValueError:
+                continue
+            try:
+                floor = int(float(min_str.replace(",", ""))) if min_str else current
+            except ValueError:
+                floor = current
+            ct, _ = _CONDITION_MAP.get(state, ("used_good", COL_NOTE_G))
+            sub_cond = _SUBCONDITION_MAP.get(ct, "good")
+            targets.append({
+                "sheet_row": sheet_row, "summary_row": None, "kanri_id": _cell(row, COL_KANRI_ID),
+                "asin": asin, "sku": sku, "current": current,
+                "floor": floor, "floor_manual": bool(min_str), "sub_condition": sub_cond,
+            })
 
-    yield f"調整対象: {len(targets)} 件（3.出品済み）"
+    yield f"調整対象: {len(targets)} 件（{'販売中/納品中' if to_summary else '3.出品済み'}）"
     yield f"設定: 奪取きざみ={step_yen}円 / 値上げきざみ={raise_step}円 / FBM上乗せ={int(fbm_premium*100)}%"
     if not targets:
         yield "対象なし。終了します。"
         return
 
     products_api = Products(credentials=_sp_creds(), marketplace=Marketplaces.JP)
-    listings_api = None if dry_run else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    listings_api = None if (dry_run or to_summary) else ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
 
     offers_cache: dict[str, dict | None] = {}
     raised = took = held = skipped = failed = 0
@@ -903,21 +943,41 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
                 yield f"  → 下限({t['floor']:,}円)を下回るため設定価格-5%={target:,}円"
             else:
                 yield f"  → 下限({t['floor']:,}円≒現在価格)を下回るためスキップ"
-                _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+                if not to_summary:
+                    _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
                 skipped += 1
                 time.sleep(0.5)
                 continue
 
         if target == t["current"]:
             yield "  → 変更なし（維持）"
-            _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
+            if not to_summary:
+                _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
             held += 1
             time.sleep(0.5)
             continue
 
         going_up = target > t["current"]
+        arrow = "⤴値上げ" if going_up else "⤵奪取"
+
+        # ── サマリーの変更金額(P列)に書き込むモード（Amazonは触らない）──
+        if to_summary:
+            srow = t["summary_row"]
+            if dry_run:
+                yield f"  → [ドライラン] 変更金額(P{srow})に {target:,}円 を書込予定 {arrow}"
+            else:
+                summary_writes.append((srow, target))
+                yield f"  → 変更金額(P{srow})に {target:,}円 を書込 {arrow}"
+            if going_up:
+                raised += 1
+            else:
+                took += 1
+            time.sleep(0.2)
+            continue
+
+        # ── 従来モード: Amazon出品価格を直接変更 ──
         if dry_run:
-            yield f"  → [ドライラン] {t['current']:,}円 → {target:,}円 {'⤴値上げ' if going_up else '⤵奪取'}"
+            yield f"  → [ドライラン] {t['current']:,}円 → {target:,}円 {arrow}"
             _batch_write_reprice(t["sheet_row"], a["cart_price"], rival_total, None, spreadsheet_id)
             if going_up:
                 raised += 1
@@ -946,7 +1006,23 @@ def run_buybox_reprice(dry_run: bool = True, step_yen: int = 10, raise_step: int
             failed += 1
         time.sleep(1)
 
-    yield f"完了: 値上げ {raised} 件 / 奪取(値下げ) {took} 件 / 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+    # サマリー書き込みモード: 変更金額(P列)へまとめて書き込み
+    if to_summary and summary_writes and not dry_run:
+        try:
+            data = [{"range": f"商品一覧!P{srow}", "values": [[str(tp)]]}
+                    for srow, tp in summary_writes]
+            _sheets_service().spreadsheets().values().batchUpdate(
+                spreadsheetId=summary_spreadsheet_id,
+                body={"valueInputOption": "RAW", "data": data},
+            ).execute()
+            yield f"📝 変更金額(P列)に {len(summary_writes)} 件 書き込みました（価格管理ページで確認→反映してください）"
+        except Exception as e:
+            yield f"❌ 変更金額の書き込みに失敗: {e}"
+
+    if to_summary:
+        yield f"完了: 変更金額に書込 {raised + took} 件（値上げ{raised}/奪取{took}）/ 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
+    else:
+        yield f"完了: 値上げ {raised} 件 / 奪取(値下げ) {took} 件 / 維持 {held} 件 / スキップ {skipped} 件 / 失敗 {failed} 件"
 
 
 def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str = None, management_spreadsheet_id=None):

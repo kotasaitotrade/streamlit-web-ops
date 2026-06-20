@@ -119,6 +119,11 @@ def _stream_logs(gen, placeholder):
     return lines
 
 
+# サマリーシート（商品一覧）。タブをまたいで使うのでここで定義。
+SUMMARY_SS_ID = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
+SUMMARY_SS_URL = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit"
+
+
 # ============================================================
 # タブ
 # ============================================================
@@ -320,15 +325,15 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
     st.divider()
     st.subheader("🛒 カート連動リプライサー（NEW）")
     st.markdown("""
-カート(BuyBox)の獲得状況に応じて賢く価格を動かします。**底値競争を避けて利益を最大化**します。
+カート(BuyBox)の獲得状況に応じて賢い価格を計算し、**サマリーの「変更金額」(P列)に書き込みます**。
+**Amazonの価格は直接変えません**。書き込み後、**価格管理ページで確認 → 反映**してください（安全な2段階）。
 
-| 状況 | 動き |
+| 状況 | 計算される価格 |
 |---|---|
-| **カート保持中(○)** | カートを保てる範囲で**少しずつ値上げ**（利益最大化） |
+| **カート保持中(○)** | カートを保てる範囲で**少し値上げ**（利益最大化） |
 | **カート未取得・競合FBA** | カート価格を**下回って奪取** |
 | **カート未取得・競合FBM** | FBAの強みで**同値〜やや上**で奪取（安売りしない） |
 
-⏱ **毎時サマリー更新**と組み合わせ「上げて落ちたら次サイクルで下げ戻す」探り運用が前提です。
 下限は **AE列（最低販売価格）**。空欄なら現在価格を下限（＝値下げしない）。
 """)
     cb1, cb2, cb3, cb4 = st.columns([1, 1, 1, 1])
@@ -342,54 +347,39 @@ AE列（最低販売価格）に入力されている価格をそのまま Amazo
     with cb3:
         raise_bb = st.number_input(
             "値上げきざみ(円)", min_value=1, max_value=5000, value=50, step=10, key="raise_bb",
-            help="カート保持中に1回の実行で何円ずつ上げるか。毎時実行で少しずつ上げ、落ちたら下げ戻す探り用。大きいほど早く上がるが落ちやすい。",
+            help="カート保持中に1回の実行で何円ずつ上げるか。大きいほど早く上がるが落ちやすい。",
         )
     with cb4:
         prem_bb = st.number_input(
             "FBM上乗せ(%)", min_value=0, max_value=50, value=5, step=1, key="prem_bb",
             help="競合がFBM（自社発送）だけのとき、FBA優位を活かしてFBM最安より何%まで上に乗せるか。",
         )
+    st.caption("ℹ️ ここでは **変更金額(P列)に書き込むだけ**。Amazonへの反映は価格管理ページで確認後に行います。")
     if not dry_bb:
-        st.warning("⚠️ 本番モード: SP-API に実際に価格変更リクエストを送信します。")
+        st.warning("⚠️ サマリーの「変更金額」(P列)を上書きします（既存の変更金額は置き換わります）。Amazonはまだ変わりません。")
 
-    # 本番は確認ステップ
-    do_bb = False
-    if st.button("▶ ドライラン実行（変更せず確認）" if dry_bb else "▶ 本番実行（価格を変更）",
-                 key="run_bb", type="secondary" if dry_bb else "primary"):
-        if dry_bb:
-            do_bb = True
-        else:
-            st.session_state["confirm_bb"] = True
-    _ph_bb = st.empty()
-    if st.session_state.get("confirm_bb") and not dry_bb:
-        with _ph_bb.container():
-            st.warning(f"⚠️ 【{ACCOUNT_LABELS.get(account, account)}】カート状況に応じて出品価格を実際に変更します。よろしいですか？")
-            cbb1, cbb2 = st.columns([1, 2])
-            yes_bb = cbb1.button("✅ はい、本番実行する", type="primary", key="confirm_bb_yes")
-            no_bb = cbb2.button("キャンセル", key="confirm_bb_no")
-        if yes_bb:
-            st.session_state["confirm_bb"] = False
-            _ph_bb.empty()
-            do_bb = True
-        elif no_bb:
-            st.session_state["confirm_bb"] = False
-            _ph_bb.empty()
+    do_bb = st.button(
+        "▶ ドライラン（変更金額へどう入るか確認）" if dry_bb else "▶ 変更金額(P列)に書き込む",
+        key="run_bb", type="secondary" if dry_bb else "primary",
+    )
 
     if do_bb:
         log_area_bb = st.empty()
-        label_bb = "ドライラン" if dry_bb else "本番"
+        label_bb = "ドライラン" if dry_bb else "書き込み"
         try:
-            with st.spinner(f"カート連動リプライス中 [{label_bb}]... (1件あたり約1〜2秒)"):
+            with st.spinner(f"カート連動リプライス計算中 [{label_bb}]... (1件あたり約1〜2秒)"):
                 _stream_logs(
                     amazon.run_buybox_reprice(
                         dry_run=dry_bb, step_yen=int(step_bb), raise_step=int(raise_bb),
                         fbm_premium=float(prem_bb) / 100.0, spreadsheet_id=ss_id,
+                        summary_spreadsheet_id=SUMMARY_SS_ID,
                     ),
                     log_area_bb,
                 )
-            st.success("✅ 完了しました")
-            if not dry_bb:
-                _get_status_counts.clear()
+            if dry_bb:
+                st.success("✅ ドライラン完了。チェックを外して「変更金額(P列)に書き込む」を押すと書き込みます。")
+            else:
+                st.success("✅ 変更金額(P列)に書き込みました。価格管理ページで確認→反映してください。")
         except Exception as e:
             st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
 
@@ -718,8 +708,6 @@ with tab5:
 
 
 # ── タブ6: 商品サマリー ──────────────────────────────────────
-SUMMARY_SS_ID = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
-SUMMARY_SS_URL = f"https://docs.google.com/spreadsheets/d/{SUMMARY_SS_ID}/edit"
 
 with tab6:
     st.subheader("📊 商品サマリー")
