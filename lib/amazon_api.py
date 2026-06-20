@@ -1812,9 +1812,11 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> dict | Non
     return {"plan_id": plan_id, "placement_option_id": p_id, "shipment_ids": ship_ids, "confirmation_ids": confirmation_ids}
 
 
-def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None):
+def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None,
+                    label_layout: str = "1面（大・1商品1ページ）"):
     """2.写真撮影済み → 出品登録(FNSKU) → FNSKUラベルPDF → FBA納品プラン → 3.発送待ち
     戻り値: (log_lines, fnsku_pdf_bytes, shipment_summary_list)
+    label_layout: FNSKUラベルの面付け（_LABEL_LAYOUTS のキー）。
     """
     from sp_api.api import ListingsItems
     from sp_api.base import Marketplaces
@@ -1914,7 +1916,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
 
     # ─── ② FNSKUラベル PDF 生成 ──────────────────────────────
     log("=== ② FNSKUラベル PDF 生成 ===")
-    fnsku_pdf = _generate_labels_pdf_from_items(items_for_pdf)
+    fnsku_pdf = _generate_labels_pdf_from_items(items_for_pdf, layout=label_layout)
     ok = sum(1 for it in items_for_pdf if it["fnsku"] and it["fnsku"] != "X00000DRY")
     log(f"  → {len(items_for_pdf)} ページ生成 (FNSKU取得: {ok}件)")
 

@@ -481,6 +481,12 @@ with tab5:
     st.divider()
     st.markdown("#### ① 出品登録 + FNSKUラベル PDF 生成 + 納品プラン作成")
 
+    fba_label_layout = st.selectbox(
+        "FNSKUラベルのサイズ・面付け",
+        ["1面（大・1商品1ページ）", "12面 (2×6)", "21面 (3×7)", "24面 (3×8)", "65面 (5×13)"],
+        index=0, key="fba_label_layout",
+        help="生成されるFNSKUラベルPDFの面付け。FNSKUラベルタブと同じ選択肢です。",
+    )
     c1, c2 = st.columns([1, 4])
     with c1:
         dry5 = st.checkbox("ドライラン", value=True, key="dry5")
@@ -521,7 +527,8 @@ with tab5:
         try:
             with st.spinner(f"処理中 [{label}]..."):
                 logs5, pdf5, plan5 = amazon.run_fba_inbound(
-                    account_name=account, dry_run=dry5, spreadsheet_id=ss_id
+                    account_name=account, dry_run=dry5, spreadsheet_id=ss_id,
+                    label_layout=fba_label_layout,
                 )
         except Exception as e:
             st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
