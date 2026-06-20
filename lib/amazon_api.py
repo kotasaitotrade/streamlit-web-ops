@@ -2400,6 +2400,164 @@ def get_cart_dashboard_data(summary_spreadsheet_id: str) -> dict:
     return res
 
 
+# ============================================================
+# 返品管理（FBA顧客返品レポート → 別シート「返品管理」）
+# ============================================================
+
+_RETURNS_SHEET = "返品管理"
+_RETURNS_HEADERS = ["返品日", "商品名", "SKU", "ASIN", "FNSKU", "数量",
+                    "販売可否", "返品理由", "やること", "お客様コメント", "FC"]
+
+# detailed-disposition → (販売可否, やること)
+_RETURN_DISPOSITION = {
+    "SELLABLE":          ("✅ 販売可能", "通常はFBAの販売可能在庫に自動で戻ります。戻らない/価格を見直す場合は価格管理で調整。"),
+    "DEFECTIVE":         ("⛔ 販売不可", "不良品。セラーセントラルで『返送/所有権の放棄』を申請して回収か廃棄。中古再出品はコンディション見直し＋検品。"),
+    "CUSTOMER_DAMAGED":  ("⛔ 販売不可", "客都合の破損。返送申請で回収し検品。再販はコンディションを下げて再出品。"),
+    "CARRIER_DAMAGED":   ("⛔ 販売不可", "配送中の破損。Amazonへ賠償請求（申請）を検討。返送または廃棄。"),
+    "DAMAGED":           ("⛔ 販売不可", "破損品。返送または廃棄。再販する場合は検品。"),
+    "EXPIRED":           ("⛔ 販売不可", "期限切れ。廃棄。"),
+    "MISSING_PARTS":     ("⛔ 販売不可", "部品欠品。返送して補充するか廃棄。"),
+}
+# 返品理由コード → 日本語
+_RETURN_REASON_JP = {
+    "UNWANTED_ITEM": "不要になった", "NOT_AS_DESCRIBED": "説明と違う",
+    "DEFECTIVE": "不良・欠陥", "MISSED_ESTIMATED_DELIVERY": "配送予定日に間に合わなかった",
+    "NO_REASON_GIVEN": "理由なし", "ORDERED_WRONG_ITEM": "注文間違い",
+    "QUALITY_UNACCEPTABLE": "品質に不満", "DAMAGED_BY_CARRIER": "配送中の破損",
+    "DAMAGED_BY_FC": "倉庫での破損", "FOUND_BETTER_PRICE": "他で安かった",
+    "ITEM_DAMAGED": "商品が破損", "NEVER_ARRIVED": "届かなかった",
+    "MISSING_PARTS": "部品が足りない", "DID_NOT_LIKE": "気に入らなかった",
+    "UNDELIVERABLE_REFUSED": "受取拒否/配達不能", "EXTRA_ITEM": "余分に届いた",
+    "WRONG_ITEM": "違う商品が届いた", "PART_NOT_COMPATIBLE": "適合しない",
+    "EXCHANGE": "交換", "APPAREL_TOO_SMALL": "サイズが小さい", "APPAREL_TOO_LARGE": "サイズが大きい",
+}
+
+
+def _fetch_report_rows(report_type: str, days: int, log=None):
+    """Reports API で指定レポートを生成→DL→(headers, rows) を返す。"""
+    from sp_api.api import Reports
+    from sp_api.base import Marketplaces
+    import datetime as dt
+    import urllib.request
+    import gzip
+
+    def _log(m):
+        if log:
+            log(m)
+
+    rep = Reports(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    start = (dt.datetime.utcnow() - dt.timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+    cr = rep.create_report(reportType=report_type, dataStartTime=start,
+                           marketplaceIds=[_marketplace_id()])
+    rid = cr.payload["reportId"]
+    doc_id = None
+    for _ in range(45):
+        time.sleep(8)
+        g = rep.get_report(rid).payload
+        stt = g.get("processingStatus")
+        if stt == "DONE":
+            doc_id = g.get("reportDocumentId")
+            break
+        if stt in ("CANCELLED", "FATAL"):
+            raise RuntimeError(f"レポート生成に失敗: {stt}")
+    if not doc_id:
+        raise TimeoutError("レポート生成がタイムアウトしました")
+    d = rep.get_report_document(doc_id).payload
+    raw = urllib.request.urlopen(d["url"], timeout=60).read()
+    if d.get("compressionAlgorithm") == "GZIP":
+        raw = gzip.decompress(raw)
+    text = None
+    for enc in ("utf-8", "cp932", "utf-16"):
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", "replace")
+    lines = text.splitlines()
+    if not lines:
+        return [], []
+    headers = lines[0].split("\t")
+    rows = [ln.split("\t") for ln in lines[1:] if ln.strip()]
+    return headers, rows
+
+
+def run_create_returns_sheet(out_spreadsheet_id: str, days: int = 90):
+    """generator: FBA顧客返品レポートを取得し、別タブ「返品管理」に書き出す。"""
+    logs = []
+
+    def log(m):
+        logs.append(m)
+
+    yield f"返品レポートを取得中...（過去{days}日・生成に数分かかる場合があります）"
+    try:
+        headers, rows = _fetch_report_rows(
+            "GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA", days, log=lambda m: None)
+    except Exception as e:
+        yield f"❌ 返品レポート取得エラー: {e}"
+        return
+
+    idx = {h: i for i, h in enumerate(headers)}
+
+    def col(r, k):
+        return r[idx[k]].strip() if k in idx and idx[k] < len(r) and r[idx[k]] else ""
+
+    out_rows = []
+    sellable = unsellable = 0
+    for r in rows:
+        disp = col(r, "detailed-disposition")
+        kahi, todo = _RETURN_DISPOSITION.get(disp, ("❓ 要確認", "セラーセントラルで商品状態を確認してください。"))
+        if disp == "SELLABLE":
+            sellable += 1
+        else:
+            unsellable += 1
+        reason_raw = col(r, "reason")
+        reason_jp = _RETURN_REASON_JP.get(reason_raw, reason_raw or "—")
+        out_rows.append([
+            col(r, "return-date")[:10],
+            col(r, "product-name"),
+            col(r, "sku"),
+            col(r, "asin"),
+            col(r, "fnsku"),
+            col(r, "quantity"),
+            kahi,
+            reason_jp,
+            todo,
+            col(r, "customer-comments"),
+            col(r, "fulfillment-center-id"),
+        ])
+    # 新しい返品が上に来るよう日付降順
+    out_rows.sort(key=lambda x: x[0], reverse=True)
+
+    yield f"返品 {len(out_rows)} 件（販売可能 {sellable} / 販売不可 {unsellable}）。書き込み中..."
+
+    svc = _sheets_service()
+    try:
+        svc.spreadsheets().values().clear(
+            spreadsheetId=out_spreadsheet_id, range=f"{_RETURNS_SHEET}!A1:K5000").execute()
+    except Exception:
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=out_spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": _RETURNS_SHEET}}}]}).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=out_spreadsheet_id, range=f"{_RETURNS_SHEET}!A1",
+        valueInputOption="RAW",
+        body={"values": [_RETURNS_HEADERS] + out_rows}).execute()
+    # 1行目固定
+    try:
+        meta = svc.spreadsheets().get(spreadsheetId=out_spreadsheet_id).execute()
+        sid = next(s["properties"]["sheetId"] for s in meta["sheets"]
+                   if s["properties"]["title"] == _RETURNS_SHEET)
+        svc.spreadsheets().batchUpdate(spreadsheetId=out_spreadsheet_id, body={"requests": [
+            {"updateSheetProperties": {"properties": {"sheetId": sid,
+             "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}}]}).execute()
+    except Exception:
+        pass
+
+    yield f"✅ 完了。返品管理シートに {len(out_rows)} 件（販売可能 {sellable} / 販売不可 {unsellable}）"
+
+
 def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     """generator: Amazon APIのみをベースにしたサマリーシートを作成/更新する。
 

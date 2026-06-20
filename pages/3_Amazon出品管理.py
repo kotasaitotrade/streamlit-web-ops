@@ -850,6 +850,34 @@ with tab6:
 
     st.divider()
 
+    # ── 📦 返品管理（別シート）──────────────────────────────
+    st.markdown("### 📦 返品管理")
+    st.markdown(
+        "FBAの顧客返品を取得し、別タブ **「返品管理」** に書き出します。"
+        "**販売可否・返品理由・やること・お客様コメント**まで一覧化されます。"
+    )
+    rc1, rc2 = st.columns([1, 3])
+    with rc1:
+        ret_days = st.number_input("対象期間（日）", min_value=7, max_value=365, value=90, step=30,
+                                   key="ret_days")
+    run_returns = rc2.button("▶ 返品管理を更新", key="run_returns", type="primary")
+    st.caption("⏱ レポート生成に数分かかる場合があります。")
+    if run_returns:
+        log_ret = st.empty()
+        lines_r = []
+        try:
+            with st.spinner("返品データを取得中...（数分）"):
+                for msg in amazon.run_create_returns_sheet(SUMMARY_SS_ID, days=int(ret_days)):
+                    lines_r.append(msg)
+                    log_ret.markdown('<div class="log-box">' + "\n".join(lines_r[-20:]) + "</div>",
+                                     unsafe_allow_html=True)
+            st.success("✅ 返品管理シートを更新しました")
+            st.markdown(f"**[📊 返品管理シートを開く]({SUMMARY_SS_URL})**")
+        except Exception as e:
+            st.error(f"❌ エラー: {e}")
+
+    st.divider()
+
     # ── ① サマリー更新 ──────────────────────────────────────
     st.markdown("### ① サマリー更新")
     st.markdown("""
