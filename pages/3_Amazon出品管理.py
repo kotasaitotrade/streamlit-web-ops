@@ -534,12 +534,13 @@ with tab5:
     st.divider()
 
     # ── ② 輸送方法の選択・確定 ────────────────────────────────
-    st.markdown("#### ② 輸送方法の選択・確定（自動）")
+    st.markdown("#### ② 輸送方法の選択・確定（⭐Amazon提携配送を既定に）")
     st.info(
-        "SP-API の `inbound_shipment_transport_write` スコープが必要です。\n"
-        "スコープ未取得の場合は 403 エラーが表示されます→管理者に申請を依頼してください。\n"
-        "スコープ取得済みであればこのセクションで輸送方法を選択・確定できます。",
-        icon="ℹ️",
+        "**Amazon提携配送（日本郵便）を既定**にしました。割引運賃で、**Amazonが集荷を手配**します。\n\n"
+        "「▶ 輸送オプションを取得」→ ⭐提携配送（小口）が先頭・既定選択で表示されます。"
+        "金額(JPY)を見てヤマト/佐川より安ければそのまま確定。自社手配が良ければ下の選択肢から選べます。\n\n"
+        "※ SP-API の `inbound_shipment_transport_write` スコープが必要です（未取得なら403。管理者に申請）。",
+        icon="🚚",
     )
 
     plan_result = st.session_state.get("fba_plan_result", {})
@@ -563,21 +564,24 @@ with tab5:
     _placement_id = placement_id_input.strip() or placement_id_val
     _shipment_ids = [s.strip() for s in shipment_ids_input.split(",") if s.strip()] or shipment_ids_val
 
-    # 発送可能期間（readyToShipWindow）入力
+    # 発送予定日（readyToShipWindow.start）入力
+    # 提携配送ではこの日が「荷物が出せる＝集荷してもらう日」の基準になります。
     from datetime import date, timedelta
     c_date1, c_date2 = st.columns(2)
     with c_date1:
         ship_start_date = st.date_input(
-            "発送可能開始日", value=date.today() + timedelta(days=1), key="fba_ship_start"
+            "発送予定日（集荷希望日）", value=date.today() + timedelta(days=1), key="fba_ship_start",
+            help="荷物が出荷できる日。Amazon提携配送ではこの日を基準に集荷が手配されます。",
         )
     with c_date2:
         ship_end_date = st.date_input(
-            "発送可能終了日", value=date.today() + timedelta(days=14), key="fba_ship_end"
+            "発送可能 終了日（自社手配の目安）", value=date.today() + timedelta(days=14), key="fba_ship_end",
+            help="自社手配(ヤマト/佐川)を選ぶ場合の発送可能期間の終わり。提携配送では使いません。",
         )
 
     date_invalid = ship_start_date > ship_end_date
     if date_invalid:
-        st.error("発送可能開始日が終了日より後になっています。日付を見直してください。")
+        st.error("発送予定日が終了日より後になっています。日付を見直してください。")
 
     if not _plan_id:
         st.caption("💡 ① を実行するとプランIDが自動入力されます。または上の欄に手動で入力してください。")
@@ -627,42 +631,43 @@ with tab5:
     # オプション選択 → 確定
     transport_options = st.session_state.get("fba_transport_options", [])
     if transport_options:
-        st.markdown("**輸送方法を選択してください**")
+        st.markdown("**輸送方法を選択してください**（⭐ = Amazon提携配送・おすすめ）")
+        st.caption("⭐ Amazon提携配送（日本郵便）は割引運賃＋Amazonが集荷を手配。"
+                   "金額(JPY)を見てヤマト/佐川より安ければ提携がおすすめです。")
 
-        _MODE_JP = {
-            "NON_PARTNERED_SPD": "自社手配・小口発送（ヤマト/佐川）",
-            "PARTNERED_SPD": "Amazon提携・小口発送",
-            "NON_PARTNERED_LTL": "自社手配・大口発送",
-            "PARTNERED_LTL": "Amazon提携・大口発送",
-            "FREIGHT_LTL": "大口発送（フレート）",
-            "FREIGHT_SPD": "小口発送（フレート）",
-        }
+        def _solution_jp(sol):
+            return {"AMAZON_PARTNERED_CARRIER": "Amazon提携配送",
+                    "USE_YOUR_OWN_CARRIER": "自社手配（ヤマト/佐川）"}.get(sol, sol or "不明")
+
+        def _mode_jp(mode):
+            return {"GROUND_SMALL_PARCEL": "小口", "FREIGHT_LTL": "大口(LTL)",
+                    "AIR_SMALL_PARCEL": "航空小口"}.get(mode, mode or "")
+
+        def _is_partnered_spd(opt):
+            return (opt.get("shippingSolution") == "AMAZON_PARTNERED_CARRIER"
+                    and opt.get("shippingMode") == "GROUND_SMALL_PARCEL")
 
         def _option_label(opt):
+            sol = opt.get("shippingSolution", "")
             mode = opt.get("shippingMode", "")
+            amount = opt.get("quote", {}).get("cost", {}).get("amount", 0)
+            star = "⭐ " if _is_partnered_spd(opt) else ""
+            label = f"{star}{_solution_jp(sol)}・{_mode_jp(mode)}"
             carrier = opt.get("carrier", {}).get("name", "")
-            cost = opt.get("quote", {}).get("cost", {})
-            amount = cost.get("amount", 0)
-            label = _MODE_JP.get(mode, mode or "不明")
             if carrier and carrier != "Other":
                 label += f" [{carrier}]"
             if amount:
                 label += f" — JPY {amount:,.0f}"
-            pre = opt.get("preconditions", [])
-            if pre:
-                label += f" ⚠️要事前設定"
+            if opt.get("preconditions"):
+                label += " ⚠️要事前設定"
             return label
 
         option_labels = [_option_label(o) for o in transport_options]
-        # preconditions があるオプションは注意表示
-        has_precond = any(o.get("preconditions") for o in transport_options)
-        if has_precond:
-            st.warning(
-                "⚠️ 一部のオプションに事前設定（配送枠確認など）が必要です。"
-                "通常の小口発送（ヤマト/佐川）は Seller Central から直接手配してください。"
-            )
+        # 提携小口(⭐)があればそれを既定選択に
+        default_idx = next((i for i, o in enumerate(transport_options) if _is_partnered_spd(o)), 0)
 
-        selected_label = st.radio("輸送オプション", option_labels, key="fba_transport_radio")
+        selected_label = st.radio("輸送オプション", option_labels, index=default_idx,
+                                  key="fba_transport_radio")
         selected_idx = option_labels.index(selected_label)
         selected_opt = transport_options[selected_idx]
 

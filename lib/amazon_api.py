@@ -1926,15 +1926,14 @@ def get_fba_transportation_options(
     if not ready_to_ship_end:
         ready_to_ship_end = (now + timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # 2024-03-20 仕様: 小口は readyToShipWindow.start のみ。shippingMode は
+    # 生成リクエストには付けず（全オプションを生成）、返ってきた options から
+    # 提携配送(AMAZON_PARTNERED_CARRIER)を選ぶ。
     configurations = []
     for ship_id in shipment_ids:
         cfg = {
             "shipmentId": ship_id,
-            "shippingMode": "NON_PARTNERED_SPD",
-            "readyToShipWindow": {
-                "start": ready_to_ship_start,
-                "end": ready_to_ship_end,
-            },
+            "readyToShipWindow": {"start": ready_to_ship_start},
         }
         if email:
             cfg["contactInformation"] = {"email": email}
@@ -1985,7 +1984,17 @@ def get_fba_transportation_options(
     if r2.status_code != 200:
         return {"options": [], "error": f"一覧取得エラー: {r2.status_code} {r2.text[:200]}"}
 
-    return {"options": r2.json().get("transportationOptions", []), "error": None}
+    options = r2.json().get("transportationOptions", [])
+    # 提携配送(AMAZON_PARTNERED_CARRIER)・小口(GROUND_SMALL_PARCEL)を先頭に並べる
+    def _opt_rank(o):
+        sol = o.get("shippingSolution", "")
+        mode = o.get("shippingMode", "")
+        partnered = (sol == "AMAZON_PARTNERED_CARRIER")
+        small = (mode == "GROUND_SMALL_PARCEL")
+        # 提携かつ小口=0（最優先）、提携=1、それ以外=2
+        return (0 if (partnered and small) else 1 if partnered else 2)
+    options.sort(key=_opt_rank)
+    return {"options": options, "error": None}
 
 
 def confirm_fba_transportation(
