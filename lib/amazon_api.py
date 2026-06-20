@@ -1371,26 +1371,125 @@ def _barcode_png(fnsku: str) -> io.BytesIO:
     return buf
 
 
-def _draw_page(c, item: dict, today: str):
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
+# FNSKUラベルのレイアウト（面数）→ (列数, 行数)。None=1面(A4全面・従来)
+_LABEL_LAYOUTS = {
+    "1面（大・1商品1ページ）": None,
+    "12面 (2×6)": (2, 6),
+    "21面 (3×7)": (3, 7),
+    "24面 (3×8)": (3, 8),
+    "65面 (5×13)": (5, 13),
+}
+
+
+def _label_font() -> str:
+    """ラベル用日本語フォントを登録して名前を返す。"""
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.utils import ImageReader
     import os
-
     FONT = "NotoSansJP"
     if FONT not in pdfmetrics.getRegisteredFontNames():
-        candidates = [
+        for path in [
             os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "NotoSansJP.ttf"),
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        ]
-        for path in candidates:
+        ]:
             if os.path.exists(path):
-                pdfmetrics.registerFont(TTFont(FONT, path))
+                try:
+                    pdfmetrics.registerFont(TTFont(FONT, path))
+                except Exception:
+                    pass
                 break
+    return FONT
 
+
+def _draw_grid_page(c, items: list, today: str, cols: int, rows: int):
+    """A4を cols×rows に面付けして、各セルにコンパクトなFNSKUラベルを描く。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    FONT = _label_font()
+    W, H = A4
+    margin = 6 * mm
+    cw = (W - 2 * margin) / cols
+    ch = (H - 2 * margin) / rows
+    pad = 0.06 * cw
+    fs_fnsku = max(5.5, min(9.0, ch / 9.0))
+    fs_small = max(4.5, min(7.0, ch / 12.0))
+
+    # 切り取りガイド（薄いグレー）
+    c.setStrokeColorRGB(0.85, 0.85, 0.85)
+    c.setLineWidth(0.3)
+    for cc in range(cols + 1):
+        x = margin + cc * cw
+        c.line(x, margin, x, H - margin)
+    for rr in range(rows + 1):
+        y = margin + rr * ch
+        c.line(margin, y, W - margin, y)
+
+    for idx, item in enumerate(items):
+        col = idx % cols
+        row = idx // cols
+        x0 = margin + col * cw
+        y_bottom = H - margin - (row + 1) * ch
+        cx = x0 + cw / 2
+
+        bc_w = cw - 2 * pad
+        bc_h = ch * 0.42
+        bc_x = x0 + pad
+        bc_y = y_bottom + ch - pad - bc_h
+        if item.get("fnsku"):
+            try:
+                c.drawImage(ImageReader(_barcode_png(item["fnsku"])), bc_x, bc_y,
+                            width=bc_w, height=bc_h, preserveAspectRatio=True, anchor="n")
+            except Exception:
+                pass
+
+        ty = bc_y - fs_fnsku * 0.9
+        c.setFont(FONT, fs_fnsku)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawCentredString(cx, ty, item.get("fnsku") or "(FNSKU未取得)")
+
+        c.setFont(FONT, fs_small)
+        c.setFillColorRGB(0.2, 0.2, 0.2)
+        c.drawCentredString(cx, ty - fs_small * 1.6, f"[{item.get('condition_jp', '')}]")
+        approx_chars = max(6, int(cw / (fs_small * 0.62)))
+        nm = item.get("item_name", "")
+        nm = nm[:approx_chars] + ("…" if len(nm) > approx_chars else "")
+        c.drawCentredString(cx, ty - fs_small * 3.0, nm)
+
+
+def _build_labels_pdf(items: list, layout: str = "1面（大・1商品1ページ）") -> bytes:
+    """item dict リストから、指定レイアウトのFNSKUラベルPDFを生成して bytes を返す。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rlcanvas
+    from datetime import datetime
+    if not items:
+        return b""
+    grid = _LABEL_LAYOUTS.get(layout)
+    today = datetime.now().strftime("%Y-%m-%d")
+    buf = io.BytesIO()
+    c = rlcanvas.Canvas(buf, pagesize=A4)
+    if grid is None:
+        for item in items:
+            _draw_page(c, item, today)
+            c.showPage()
+    else:
+        cols, rows = grid
+        per = cols * rows
+        for i in range(0, len(items), per):
+            _draw_grid_page(c, items[i:i + per], today, cols, rows)
+            c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def _draw_page(c, item: dict, today: str):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    FONT = _label_font()
     W, H = A4
     margin = 18 * mm
 
@@ -1440,8 +1539,9 @@ def _draw_page(c, item: dict, today: str):
     c.drawRightString(W - margin, 11 * mm, item.get("asin", ""))
 
 
-def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, list[str]]:
-    """FNSKUラベル PDF を生成して (bytes, log_lines) を返す。"""
+def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None,
+                     layout: str = "1面（大・1商品1ページ）") -> tuple[bytes, list[str]]:
+    """FNSKUラベル PDF を生成して (bytes, log_lines) を返す。layout で面付けを選べる。"""
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as rlcanvas
     from sp_api.api import ListingsItems
@@ -1507,18 +1607,12 @@ def run_fnsku_labels(target_sku: str = "", spreadsheet_id=None) -> tuple[bytes, 
         })
         time.sleep(0.2)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    buf = io.BytesIO()
-    c = rlcanvas.Canvas(buf, pagesize=A4)
-    for item in items_for_pdf:
-        _draw_page(c, item, today)
-        c.showPage()
-    c.save()
+    pdf_bytes = _build_labels_pdf(items_for_pdf, layout=layout)
 
     ok  = sum(1 for it in items_for_pdf if it["fnsku"])
-    log(f"PDF 生成完了: {len(items_for_pdf)} ページ")
+    log(f"PDF 生成完了: ラベル {len(items_for_pdf)} 件（レイアウト: {layout}）")
     log(f"FNSKU 取得: {ok} 件 / 未取得: {len(items_for_pdf) - ok} 件")
-    return buf.getvalue(), logs
+    return pdf_bytes, logs
 
 
 # ============================================================
@@ -1537,21 +1631,10 @@ def _ship_from_address(account_name: str) -> dict:
     }
 
 
-def _generate_labels_pdf_from_items(items_for_pdf: list) -> bytes:
-    """item dict リストから FNSKU ラベル PDF を生成して bytes を返す。"""
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas as rlcanvas
-    from datetime import datetime
-    if not items_for_pdf:
-        return b""
-    today = datetime.now().strftime("%Y-%m-%d")
-    buf = io.BytesIO()
-    c = rlcanvas.Canvas(buf, pagesize=A4)
-    for item in items_for_pdf:
-        _draw_page(c, item, today)
-        c.showPage()
-    c.save()
-    return buf.getvalue()
+def _generate_labels_pdf_from_items(items_for_pdf: list,
+                                    layout: str = "1面（大・1商品1ページ）") -> bytes:
+    """item dict リストから FNSKU ラベル PDF を生成して bytes を返す。layout で面付け選択。"""
+    return _build_labels_pdf(items_for_pdf, layout=layout)
 
 
 def _fba_get_access_token() -> str:

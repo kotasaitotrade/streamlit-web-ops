@@ -407,14 +407,22 @@ with tab4:
 ```
 """)
 
-    c1, c2 = st.columns([2, 3])
+    c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
         target_sku = st.text_input(
             "SKU 絞り込み（任意）",
-            placeholder="例: RS00006ST14200260422  （空白=全件）",
+            placeholder="例: RS00006ST… （空白=全件）",
             key="target_sku",
         )
     with c2:
+        label_layout = st.selectbox(
+            "ラベルのサイズ・面付け",
+            list(amazon._LABEL_LAYOUTS.keys()),
+            index=0,
+            key="label_layout",
+            help="1面=A4に1ラベル(大・切り取り)。12/24/65面=A4に複数ラベルを面付け（ラベルシール/紙節約）。",
+        )
+    with c3:
         st.markdown("<br>", unsafe_allow_html=True)
         run_labels = st.button("▶ PDF 生成", key="run_labels", type="primary", use_container_width=True)
 
@@ -422,7 +430,8 @@ with tab4:
         sku_filter = target_sku.strip()
         try:
             with st.spinner("PDF 生成中... (SP-API と Drive にアクセスします)"):
-                pdf_bytes, logs = amazon.run_fnsku_labels(target_sku=sku_filter, spreadsheet_id=ss_id)
+                pdf_bytes, logs = amazon.run_fnsku_labels(
+                    target_sku=sku_filter, spreadsheet_id=ss_id, layout=label_layout)
         except Exception as e:
             st.error(f"❌ エラーが発生しました（通信状況をご確認ください）: {e}")
             pdf_bytes, logs = None, []
