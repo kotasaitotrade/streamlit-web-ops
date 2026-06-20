@@ -415,9 +415,17 @@ with tab4:
             key="target_sku",
         )
     with c2:
+        # 選択肢はここで定義（lib の _LABEL_LAYOUTS のキーと一致させること）
+        _LABEL_LAYOUT_OPTIONS = [
+            "1面（大・1商品1ページ）",
+            "12面 (2×6)",
+            "21面 (3×7)",
+            "24面 (3×8)",
+            "65面 (5×13)",
+        ]
         label_layout = st.selectbox(
             "ラベルのサイズ・面付け",
-            list(amazon._LABEL_LAYOUTS.keys()),
+            _LABEL_LAYOUT_OPTIONS,
             index=0,
             key="label_layout",
             help="1面=A4に1ラベル(大・切り取り)。12/24/65面=A4に複数ラベルを面付け（ラベルシール/紙節約）。",
@@ -819,7 +827,8 @@ with tab6:
 
         if dash["history"] and len(dash["history"]) >= 2:
             import pandas as _pd
-            hist_df = _pd.DataFrame(dash["history"], columns=amazon._CART_HISTORY_HEADERS[:6])
+            _hist_cols = ["日時", "対象数", "○獲得", "△", "✗未獲得", "獲得率%"]
+            hist_df = _pd.DataFrame(dash["history"], columns=_hist_cols)
             try:
                 hist_df["獲得率%"] = _pd.to_numeric(hist_df["獲得率%"], errors="coerce")
                 st.markdown("**📈 獲得率の推移**")
