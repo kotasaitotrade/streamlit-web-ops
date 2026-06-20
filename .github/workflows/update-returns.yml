@@ -1,0 +1,39 @@
+name: 返品管理シート自動更新
+
+on:
+  schedule:
+    # 6時間ごと（:31）。返品は頻繁に変わらないため毎時にはしない。
+    - cron: "31 */6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: update-returns
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 依存パッケージのインストール
+        run: pip install -r requirements.txt
+
+      - name: 返品管理シート更新を実行
+        env:
+          GSPREAD_TOKEN_JSON:   ${{ secrets.GSPREAD_TOKEN_JSON }}
+          SP_LWA_APP_ID:        ${{ secrets.SP_LWA_APP_ID }}
+          SP_LWA_CLIENT_SECRET: ${{ secrets.SP_LWA_CLIENT_SECRET }}
+          SP_REFRESH_TOKEN:     ${{ secrets.SP_REFRESH_TOKEN }}
+          SP_SELLER_ID:         ${{ secrets.SP_SELLER_ID }}
+          SP_MARKETPLACE_ID:    ${{ secrets.SP_MARKETPLACE_ID }}
+          RETURNS_DAYS:         "90"
+        run: python scripts/ci_update_returns.py
