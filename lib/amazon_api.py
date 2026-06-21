@@ -1158,7 +1158,14 @@ def run_set_price_from_summary(dry_run: bool = True, summary_spreadsheet_id: str
                     valueInputOption="RAW",
                     body={"values": [[str(t["new_price"])]]},
                 ).execute()
-            yield f"  → 更新完了: {current_label} → {t['new_price']:,}円"
+            # 適用済みなので変更金額(P列)をクリア（"保留中"として残さない・再適用を防ぐ）
+            svc.spreadsheets().values().update(
+                spreadsheetId=summary_spreadsheet_id,
+                range=f"商品一覧!P{t['summary_row']}",
+                valueInputOption="RAW",
+                body={"values": [[""]]},
+            ).execute()
+            yield f"  → 更新完了: {current_label} → {t['new_price']:,}円（変更金額クリア）"
             updated += 1
         except Exception as e:
             yield f"  → エラー: {e}"
@@ -2577,6 +2584,21 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
     svc = _sheets_service()
     creds = _sp_creds()
 
+    # 既存の「変更金額(P列)」を SKU 別に読む（手入力値を毎時更新で消さないため）。
+    # P列が空の行だけ AE(最低販売価格) で補完し、入力済みの行はそのまま保持する。
+    existing_change: dict[str, str] = {}
+    if out_spreadsheet_id:
+        try:
+            _ex = svc.spreadsheets().values().get(
+                spreadsheetId=out_spreadsheet_id, range="商品一覧!A2:P5000").execute().get("values", [])
+            for _r in _ex:
+                if _r and len(_r) > _SCOL_CHANGE_PRICE and _r[_SCOL_SKU].strip():
+                    _v = _r[_SCOL_CHANGE_PRICE].strip() if _r[_SCOL_CHANGE_PRICE] else ""
+                    if _v:
+                        existing_change[_r[_SCOL_SKU].strip()] = _v
+        except Exception:
+            pass
+
     # ── Step 1: FBA Inventory（販売中） ─────────────────────────────────
     yield "① Amazon FBA在庫を取得中..."
     inv_api = Inventories(credentials=creds, marketplace=Marketplaces.JP)
@@ -2931,7 +2953,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             lowest_cond_str,              # M: 最低価格状態
             rival_count,                  # N: FBAライバル数
             fba_min_str,                  # O: 同コンFBA最低金額
-            master.get("min_price", ""),  # P: 変更金額（ユーザー手動入力）
+            existing_change.get(sku) or master.get("min_price", ""),  # P: 変更金額（手入力を保持、空ならAEで補完）
             asin,                         # Q: ASIN
             master.get("account", ""),    # R: アカウント
             fba_date,                     # S: FBA納品日
