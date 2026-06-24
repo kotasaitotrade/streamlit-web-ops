@@ -2967,27 +2967,38 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
     # ── Step 6: スプレッドシート書き込み ────────────────────────────────
     try:
-        # C: クリア前に前回のカート状況(SKU→○/△/✗)を読む（差分でカート喪失を検知）
+        # クリア前に既存行を全列読む（差分更新: APIにないSKUの行を保持 + カート喪失検知）
         prev_cart = {}
+        existing_by_sku: dict = {}
         if out_spreadsheet_id:
             try:
                 _old = svc.spreadsheets().values().get(
-                    spreadsheetId=out_spreadsheet_id, range="商品一覧!A2:H5000",
+                    spreadsheetId=out_spreadsheet_id, range="商品一覧!A2:W5000",
                 ).execute().get("values", [])
                 for _r in _old:
-                    if _r and len(_r) > _SCOL_CART and _r[_SCOL_SKU].strip():
-                        prev_cart[_r[_SCOL_SKU].strip()] = _r[_SCOL_CART].strip()
+                    if _r and _r[_SCOL_SKU].strip():
+                        _sku = _r[_SCOL_SKU].strip()
+                        existing_by_sku[_sku] = _r
+                        if len(_r) > _SCOL_CART:
+                            prev_cart[_sku] = _r[_SCOL_CART].strip()
             except Exception:
                 pass
+
+        # Amazon APIで取得できなかったSKUの行は消さずに末尾に保持する
+        api_sku_set = {row[_SCOL_SKU] for row in all_rows if row[_SCOL_SKU]}
+        preserved_rows = [existing_by_sku[sku] for sku in existing_by_sku if sku not in api_sku_set]
+        final_rows = all_rows + preserved_rows
+        if preserved_rows:
+            yield f"  → 既存行保持: {len(preserved_rows)} 件（APIデータ外のSKU）"
 
         if out_spreadsheet_id:
             ss_id  = out_spreadsheet_id
             ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
-            yield "既存スプレッドシートをクリアして上書きします..."
+            yield f"スプレッドシートを差分更新します... (API:{len(all_rows)}件 + 保持:{len(preserved_rows)}件)"
             # シートが存在しない場合は先に作成する
             try:
                 svc.spreadsheets().values().clear(
-                    spreadsheetId=ss_id, range="商品一覧!A1:T5000",
+                    spreadsheetId=ss_id, range="商品一覧!A1:W5000",
                 ).execute()
             except Exception:
                 yield "  → 「商品一覧」シートが未作成のため新規追加します..."
@@ -3005,11 +3016,11 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             ss_url = ss["spreadsheetUrl"]
             yield f"作成完了: {ss_url}"
 
-        yield f"データ書き込み中... ({len(all_rows)} 件)"
+        yield f"データ書き込み中... ({len(final_rows)} 件)"
         svc.spreadsheets().values().update(
             spreadsheetId=ss_id, range="商品一覧!A1",
             valueInputOption="USER_ENTERED",
-            body={"values": [_SUMMARY_HEADERS] + all_rows},
+            body={"values": [_SUMMARY_HEADERS] + final_rows},
         ).execute()
         yield "  → 書き込み完了"
 
@@ -3025,7 +3036,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                 }},
                 {"updateDimensionProperties": {
                     "range": {"sheetId": sheet_id, "dimension": "ROWS",
-                              "startIndex": 1, "endIndex": max(len(all_rows), 1) + 1},
+                              "startIndex": 1, "endIndex": max(len(final_rows), 1) + 1},
                     "properties": {"pixelSize": 120}, "fields": "pixelSize",
                 }},
                 {"updateDimensionProperties": {
@@ -3036,7 +3047,7 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             ]},
         ).execute()
 
-        yield f"完了！ {len(all_rows)} 件を書き込みました"
+        yield f"完了！ {len(final_rows)} 件を書き込みました"
         yield f"URL: {ss_url}"
 
         # ── C/D: カート喪失検知 → Discord通知 ＋ 履歴追記（失敗しても本処理は止めない）──
