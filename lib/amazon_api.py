@@ -3094,3 +3094,205 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         import traceback
         yield f"❌ 書き込みエラー: {e}"
         yield traceback.format_exc()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# カート価格5%自動調整
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REPRICE_SS_ID      = "1TEp7CTkDtApX8agWufw7v9w9hYkif58MLJcKwjz4mic"
+_REPRICE_SHEET      = "商品一覧"
+_REPRICE_THRESHOLD  = 0.05   # 5% 以内なら自動調整
+_REPRICE_API_SLEEP  = 1.5    # QuotaExceeded 対策
+
+# 商品一覧シートの列定義（_SCOL_* と重複するが reprice は独立して読む）
+_RC_SKU    = 0   # A
+_RC_STATUS = 1   # B
+_RC_NAME   = 2   # C
+_RC_PRICE  = 6   # G: 販売価格
+_RC_CART   = 7   # H: カート獲得
+_RC_CARTPR = 8   # I: カート価格
+_RC_LOWEST = 11  # L: 最低価格
+_RC_ASIN   = 16  # Q
+
+
+def _reprice_fetch_pricing(products_api, asin):
+    """ASIN のカート/最低価格をリアルタイムで取得する。"""
+    result = {"cart_winner": "✗", "cart_price": None, "lowest_price": None}
+    try:
+        resp    = products_api.get_item_offers(asin, item_condition="Used")
+        payload = resp.payload or {}
+    except Exception as e:
+        if "QuotaExceeded" not in str(e):
+            print(f"    pricing error ({asin}): {str(e)[:60]}")
+        return result
+
+    summary = payload.get("Summary", {})
+    offers  = payload.get("Offers", []) or []
+
+    for bb in summary.get("BuyBoxPrices", []):
+        if str(bb.get("condition", "")).lower() in ("used", ""):
+            amt = bb.get("LandedPrice", {}).get("Amount")
+            if amt is not None:
+                result["cart_price"] = int(float(amt))
+                break
+
+    for o in offers:
+        if o.get("IsBuyBoxWinner") and o.get("MyOffer"):
+            result["cart_winner"] = "✓"
+            break
+
+    if offers:
+        lo = min(offers, key=lambda o: o.get("ListingPrice", {}).get("Amount", float("inf")))
+        amt = lo.get("ListingPrice", {}).get("Amount")
+        if amt is not None:
+            result["lowest_price"] = int(float(amt))
+    else:
+        for lp in summary.get("LowestPrices", []):
+            if lp.get("condition") == "used":
+                amt = lp.get("LandedPrice", {}).get("Amount")
+                if amt is not None:
+                    result["lowest_price"] = int(float(amt))
+                break
+
+    return result
+
+
+def run_auto_reprice():
+    """generator: 商品一覧の販売中SKUを対象にカート価格5%以内で自動値下げ/値上げする。"""
+    from sp_api.api import ListingsItems, Products
+    from sp_api.base import Marketplaces
+
+    svc = _sheets_service()
+
+    yield "=== カート価格5%自動調整 ==="
+
+    yield "[1/3] Google Sheets 読み込み中..."
+    result = svc.spreadsheets().values().get(
+        spreadsheetId=_REPRICE_SS_ID,
+        range=f"{_REPRICE_SHEET}!A2:Q500",
+    ).execute()
+    rows = result.get("values", [])
+
+    def gc(row, col):
+        return row[col].strip() if col < len(row) and row[col] else ""
+
+    targets = []
+    for i, row in enumerate(rows, start=2):
+        if gc(row, _RC_STATUS) != "販売中":
+            continue
+        sku   = gc(row, _RC_SKU)
+        asin  = gc(row, _RC_ASIN)
+        price = gc(row, _RC_PRICE)
+        if not sku or not asin or not price:
+            continue
+        try:
+            cur = int(float(price.replace(",", "").replace("¥", "")))
+        except ValueError:
+            continue
+        targets.append({"sheet_row": i, "sku": sku, "asin": asin,
+                         "name": gc(row, _RC_NAME), "current": cur})
+
+    yield f"  販売中: {len(targets)} 件"
+
+    yield f"[2/3] Amazon価格情報取得・調整中..."
+    products_api = Products(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    listings_api = ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+
+    lowered = raised = skipped = failed = 0
+
+    for idx, t in enumerate(targets, 1):
+        cur = t["current"]
+        yield f"  [{idx}/{len(targets)}] {t['name'][:30]} | 現在={cur}円"
+
+        pricing = _reprice_fetch_pricing(products_api, t["asin"])
+        time.sleep(_REPRICE_API_SLEEP)
+
+        cart_price   = pricing["cart_price"]
+        cart_winner  = pricing["cart_winner"]
+        lowest_price = pricing["lowest_price"]
+
+        new_price = None
+        reason    = ""
+
+        if cart_winner == "✗" and cart_price is not None:
+            target = cart_price - 1
+            if target < 1:
+                reason = f"カート価格{cart_price}円-1円が1円未満"
+            elif target >= cur:
+                reason = f"現在価格({cur}円)≤目標({target}円) — 下げ不要"
+            else:
+                diff = (cur - target) / cur
+                if diff <= _REPRICE_THRESHOLD:
+                    new_price = target
+                    reason = f"カート{cart_price}-1={target}円 ({diff*100:.1f}%下げ)"
+                else:
+                    reason = f"差{diff*100:.1f}%が閾値超 → スキップ"
+
+        elif cart_winner == "✓" and lowest_price is not None:
+            target = lowest_price - 1
+            if target > cur:
+                diff = (target - cur) / cur
+                if diff <= _REPRICE_THRESHOLD:
+                    new_price = target
+                    reason = f"カート保持・値上げ余地 ({diff*100:.1f}%)"
+                else:
+                    reason = f"値上げ幅{diff*100:.1f}%が閾値超 → スキップ"
+            else:
+                reason = "カート保持・値上げ余地なし"
+        else:
+            reason = "カート価格取得不可"
+
+        if new_price is None:
+            yield f"    → スキップ: {reason}"
+            skipped += 1
+            continue
+
+        direction = "↓" if new_price < cur else "↑"
+        yield f"    → {direction}{cur}→{new_price}円 ({reason})"
+
+        try:
+            resp = listings_api.get_listings_item(
+                sellerId=_seller_id(), sku=t["sku"],
+                marketplaceIds=[_marketplace_id()],
+            )
+            product_type = getattr(resp.payload, "productType", None) or "PRODUCT"
+        except Exception:
+            product_type = "PRODUCT"
+
+        try:
+            listings_api.patch_listings_item(
+                sellerId=_seller_id(), sku=t["sku"],
+                marketplaceIds=[_marketplace_id()],
+                body={
+                    "productType": product_type,
+                    "patches": [{
+                        "op": "replace",
+                        "path": "/attributes/purchasable_offer",
+                        "value": [{"currency": "JPY",
+                                   "our_price": [{"schedule": [{"value_with_tax": float(new_price)}]}]}],
+                    }],
+                },
+            )
+            data = [
+                {"range": f"{_REPRICE_SHEET}!G{t['sheet_row']}", "values": [[str(new_price)]]},
+                {"range": f"{_REPRICE_SHEET}!H{t['sheet_row']}", "values": [[cart_winner]]},
+            ]
+            if cart_price is not None:
+                data.append({"range": f"{_REPRICE_SHEET}!I{t['sheet_row']}", "values": [[str(cart_price)]]})
+            if lowest_price is not None:
+                data.append({"range": f"{_REPRICE_SHEET}!L{t['sheet_row']}", "values": [[str(lowest_price)]]})
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=_REPRICE_SS_ID,
+                body={"valueInputOption": "RAW", "data": data},
+            ).execute()
+
+            if new_price < cur:
+                lowered += 1
+            else:
+                raised += 1
+        except Exception as e:
+            yield f"    → エラー: {e}"
+            failed += 1
+
+    yield f"[3/3] 完了 — 値下げ:{lowered}件 / 値上げ:{raised}件 / スキップ:{skipped}件 / 失敗:{failed}件"

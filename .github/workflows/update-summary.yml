@@ -41,3 +41,13 @@ jobs:
           SP_MARKETPLACE_ID:    ${{ secrets.SP_MARKETPLACE_ID }}
           DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}  # 任意: 設定するとカート喪失を通知
         run: python scripts/ci_update_summary.py
+
+      - name: カート価格5%自動調整
+        env:
+          GSPREAD_TOKEN_JSON:   ${{ secrets.GSPREAD_TOKEN_JSON }}
+          SP_LWA_APP_ID:        ${{ secrets.SP_LWA_APP_ID }}
+          SP_LWA_CLIENT_SECRET: ${{ secrets.SP_LWA_CLIENT_SECRET }}
+          SP_REFRESH_TOKEN:     ${{ secrets.SP_REFRESH_TOKEN }}
+          SP_SELLER_ID:         ${{ secrets.SP_SELLER_ID }}
+          SP_MARKETPLACE_ID:    ${{ secrets.SP_MARKETPLACE_ID }}
+        run: python scripts/ci_reprice.py
