@@ -2965,46 +2965,38 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
 
     yield f"合計 {len(all_rows)} 件集計完了"
 
-    # ── Step 6: スプレッドシート書き込み ────────────────────────────────
+    # ── Step 6: スプレッドシート書き込み（clear禁止・行単位差分更新）────────
+    # 方針: シートをクリアしない。既存行は上書き、新規SKUは末尾に追記。
+    # → APIが返さないSKUの行は一切触らないため、行が消える問題が根本解決される。
     try:
-        # クリア前に既存行を全列読む（差分更新: APIにないSKUの行を保持 + カート喪失検知）
-        prev_cart = {}
-        existing_by_sku: dict = {}
-        if out_spreadsheet_id:
-            try:
-                _old = svc.spreadsheets().values().get(
-                    spreadsheetId=out_spreadsheet_id, range="商品一覧!A2:W5000",
-                ).execute().get("values", [])
-                for _r in _old:
-                    if _r and _r[_SCOL_SKU].strip():
-                        _sku = _r[_SCOL_SKU].strip()
-                        existing_by_sku[_sku] = _r
-                        if len(_r) > _SCOL_CART:
-                            prev_cart[_sku] = _r[_SCOL_CART].strip()
-            except Exception:
-                pass
-
-        # Amazon APIで取得できなかったSKUの行は消さずに末尾に保持する
-        api_sku_set = {row[_SCOL_SKU] for row in all_rows if row[_SCOL_SKU]}
-        preserved_rows = [existing_by_sku[sku] for sku in existing_by_sku if sku not in api_sku_set]
-        final_rows = all_rows + preserved_rows
-        if preserved_rows:
-            yield f"  → 既存行保持: {len(preserved_rows)} 件（APIデータ外のSKU）"
+        # 既存行を読んで SKU→行番号マップを作成（カート喪失検知にも使う）
+        prev_cart: dict = {}
+        existing_sku_row: dict = {}   # sku → シート行番号（1始まり、1行目=ヘッダー）
 
         if out_spreadsheet_id:
             ss_id  = out_spreadsheet_id
             ss_url = f"https://docs.google.com/spreadsheets/d/{ss_id}/edit"
-            yield f"スプレッドシートを差分更新します... (API:{len(all_rows)}件 + 保持:{len(preserved_rows)}件)"
-            # シートが存在しない場合は先に作成する
             try:
-                svc.spreadsheets().values().clear(
-                    spreadsheetId=ss_id, range="商品一覧!A1:W5000",
-                ).execute()
+                _old = svc.spreadsheets().values().get(
+                    spreadsheetId=ss_id, range="商品一覧!A2:H5000",
+                ).execute().get("values", [])
+                for _i, _r in enumerate(_old):
+                    if _r and _r[_SCOL_SKU].strip():
+                        _sku = _r[_SCOL_SKU].strip()
+                        existing_sku_row[_sku] = _i + 2   # index 0 = row 2
+                        if len(_r) > _SCOL_CART:
+                            prev_cart[_sku] = _r[_SCOL_CART].strip()
             except Exception:
+                # シートが存在しない場合は新規作成
                 yield "  → 「商品一覧」シートが未作成のため新規追加します..."
                 svc.spreadsheets().batchUpdate(
                     spreadsheetId=ss_id,
                     body={"requests": [{"addSheet": {"properties": {"title": "商品一覧"}}}]},
+                ).execute()
+                svc.spreadsheets().values().update(
+                    spreadsheetId=ss_id, range="商品一覧!A1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [_SUMMARY_HEADERS]},
                 ).execute()
         else:
             yield "新規スプレッドシートを作成中..."
@@ -3014,43 +3006,77 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             }).execute()
             ss_id  = ss["spreadsheetId"]
             ss_url = ss["spreadsheetUrl"]
+            svc.spreadsheets().values().update(
+                spreadsheetId=ss_id, range="商品一覧!A1",
+                valueInputOption="USER_ENTERED",
+                body={"values": [_SUMMARY_HEADERS]},
+            ).execute()
             yield f"作成完了: {ss_url}"
 
-        yield f"データ書き込み中... ({len(final_rows)} 件)"
-        svc.spreadsheets().values().update(
-            spreadsheetId=ss_id, range="商品一覧!A1",
-            valueInputOption="USER_ENTERED",
-            body={"values": [_SUMMARY_HEADERS] + final_rows},
-        ).execute()
+        # 既存行は行番号を指定して上書き、新規SKUは末尾に追記
+        update_data = []
+        new_rows    = []
+        for row in all_rows:
+            sku = row[_SCOL_SKU]
+            if sku in existing_sku_row:
+                rn = existing_sku_row[sku]
+                update_data.append({
+                    "range": f"商品一覧!A{rn}:W{rn}",
+                    "values": [row],
+                })
+            else:
+                new_rows.append(row)
+
+        yield f"データ更新中... (上書き:{len(update_data)}件 / 新規追加:{len(new_rows)}件)"
+
+        if update_data:
+            for _s in range(0, len(update_data), 500):
+                svc.spreadsheets().values().batchUpdate(
+                    spreadsheetId=ss_id,
+                    body={"valueInputOption": "USER_ENTERED",
+                          "data": update_data[_s:_s + 500]},
+                ).execute()
+
+        if new_rows:
+            svc.spreadsheets().values().append(
+                spreadsheetId=ss_id,
+                range="商品一覧!A1",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": new_rows},
+            ).execute()
+
         yield "  → 書き込み完了"
 
-        # 書式: 1行固定・行高120px・写真列160px
+        # 書式: ヘッダー固定・写真列160px（新規行があれば行高120px も設定）
         sheet_id = svc.spreadsheets().get(spreadsheetId=ss_id).execute()["sheets"][0]["properties"]["sheetId"]
+        fmt_reqs = [
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sheet_id,
+                               "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                          "startIndex": 3, "endIndex": 4},
+                "properties": {"pixelSize": 160}, "fields": "pixelSize",
+            }},
+        ]
+        if new_rows:
+            _next_row = max(existing_sku_row.values(), default=1)
+            fmt_reqs.append({"updateDimensionProperties": {
+                "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                          "startIndex": _next_row, "endIndex": _next_row + len(new_rows)},
+                "properties": {"pixelSize": 120}, "fields": "pixelSize",
+            }})
         svc.spreadsheets().batchUpdate(
-            spreadsheetId=ss_id,
-            body={"requests": [
-                {"updateSheetProperties": {
-                    "properties": {"sheetId": sheet_id,
-                                   "gridProperties": {"frozenRowCount": 1}},
-                    "fields": "gridProperties.frozenRowCount",
-                }},
-                {"updateDimensionProperties": {
-                    "range": {"sheetId": sheet_id, "dimension": "ROWS",
-                              "startIndex": 1, "endIndex": max(len(final_rows), 1) + 1},
-                    "properties": {"pixelSize": 120}, "fields": "pixelSize",
-                }},
-                {"updateDimensionProperties": {
-                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                              "startIndex": 3, "endIndex": 4},  # 写真列
-                    "properties": {"pixelSize": 160}, "fields": "pixelSize",
-                }},
-            ]},
+            spreadsheetId=ss_id, body={"requests": fmt_reqs},
         ).execute()
 
-        yield f"完了！ {len(final_rows)} 件を書き込みました"
+        yield f"完了！ 更新:{len(update_data)}件 / 新規:{len(new_rows)}件"
         yield f"URL: {ss_url}"
 
-        # ── C/D: カート喪失検知 → Discord通知 ＋ 履歴追記（失敗しても本処理は止めない）──
+        # ── カート喪失検知 → Discord通知 ＋ 履歴追記 ──────────────────────
         try:
             won = partial = lost = 0
             losses = []
@@ -3064,7 +3090,6 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                     lost += 1
                 else:
                     continue
-                # 前回○ → 今回○でない＝カート喪失
                 if prev_cart.get(row[_SCOL_SKU]) == "○" and bb != "○":
                     losses.append(row)
 
@@ -3083,7 +3108,6 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                     note = "（Discord未設定のため通知スキップ）"
                 yield f"🔔 カート喪失 {len(losses)} 件{note}"
 
-            # D: カート履歴に1行追記（獲得率の推移用）
             total_cart = won + partial + lost
             rate = round(won / total_cart * 100, 1) if total_cart else 0.0
             now_jst = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
