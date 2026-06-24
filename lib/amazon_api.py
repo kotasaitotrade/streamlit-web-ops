@@ -2823,10 +2823,15 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             status       = "販売中"
             listing_date = fba.get("last_updated", "")
             sold_date    = ""
-        elif inbound or total_qty > 0:
-            # inbound_skus にある or FBA在庫あり(fulfillable=0) → 納品中
+        elif inbound:
+            # 仕入れ者がFBAへ送付中（seller-initiated inbound）→ 納品中
             status       = "納品中"
             listing_date = ""
+            sold_date    = ""
+        elif total_qty > 0:
+            # FC間転送中（Amazon内部移動）→ まだBUYABLE扱い → 販売中
+            status       = "販売中"
+            listing_date = fba.get("last_updated", "")
             sold_date    = ""
         elif sold:
             status       = "売却済み"
