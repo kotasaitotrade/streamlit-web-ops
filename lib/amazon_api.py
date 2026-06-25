@@ -2600,27 +2600,35 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
             pass
 
     # ── Step 1: FBA Inventory（販売中） ─────────────────────────────────
+    # ページネーションに対応（1ページ50件 → 全件取得）
     yield "① Amazon FBA在庫を取得中..."
     inv_api = Inventories(credentials=creds, marketplace=Marketplaces.JP)
     fba_items: dict[str, dict] = {}  # sku -> {asin, product_name, condition, last_updated, total_qty}
     try:
-        resp = inv_api.get_inventory_summary_marketplace(
-            marketplaceId=_marketplace_id(), details=True
-        )
-        for item in resp.payload.get("inventorySummaries", []):
-            sku = item.get("sellerSku", "")
-            if not sku:
-                continue
-            det = item.get("inventoryDetails", {})
-            fulfillable = det.get("fulfillableQuantity", 0)
-            fba_items[sku] = {
-                "asin":           item.get("asin", ""),
-                "product_name":   item.get("productName", ""),
-                "condition":      item.get("condition", ""),
-                "last_updated":   (item.get("lastUpdatedTime") or "")[:10],
-                "total_qty":      item.get("totalQuantity", 0),
-                "fulfillable_qty": fulfillable,  # 実際に販売可能な数量
-            }
+        _next_token = None
+        while True:
+            _kwargs = {"marketplaceId": _marketplace_id(), "details": True}
+            if _next_token:
+                _kwargs["nextToken"] = _next_token
+            resp = inv_api.get_inventory_summary_marketplace(**_kwargs)
+            for item in resp.payload.get("inventorySummaries", []):
+                sku = item.get("sellerSku", "")
+                if not sku:
+                    continue
+                det = item.get("inventoryDetails", {})
+                fulfillable = det.get("fulfillableQuantity", 0)
+                fba_items[sku] = {
+                    "asin":           item.get("asin", ""),
+                    "product_name":   item.get("productName", ""),
+                    "condition":      item.get("condition", ""),
+                    "last_updated":   (item.get("lastUpdatedTime") or "")[:10],
+                    "total_qty":      item.get("totalQuantity", 0),
+                    "fulfillable_qty": fulfillable,
+                }
+            _next_token = resp.payload.get("pagination", {}).get("nextToken")
+            if not _next_token:
+                break
+            time.sleep(0.5)
     except Exception as e:
         yield f"FBA在庫取得エラー: {e}"
     yield f"  → {len(fba_items)} SKU"
