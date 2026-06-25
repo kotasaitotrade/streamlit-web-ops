@@ -2734,11 +2734,12 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
                 marketplaceIds=[_marketplace_id()],
                 includedData=["summaries"],
             )
-            _summaries = getattr(_resp.payload, "summaries", []) or []
-            for _s in _summaries:
-                if getattr(_s, "status", "") == "BUYABLE":
+            _p = _resp.payload
+            _summaries = _p.get("summaries", []) if isinstance(_p, dict) else (getattr(_p, "summaries", None) or [])
+            if _summaries:
+                _status_list = _summaries[0].get("status", []) if isinstance(_summaries[0], dict) else (getattr(_summaries[0], "status", None) or [])
+                if "BUYABLE" in _status_list:
                     buyable_skus.add(_sku)
-                    break
         except Exception:
             pass
         time.sleep(0.5)
