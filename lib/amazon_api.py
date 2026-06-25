@@ -2717,6 +2717,35 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         yield f"注文取得エラー: {e}"
     yield f"  → {len(sold_skus)} SKU（売却済み）"
 
+    # ── Step 3.5: ListingsItems BUYABLE 確認 ─────────────────────────────
+    # Inventories API は FC転送中・一部FBAなどBUYABLE商品を拾いきれない。
+    # ListingsItems で BUYABLE ステータスを確認し、販売中判定の正解ソースにする。
+    # 対象: fba_items（在庫APIが知っている全商品）
+    yield "③.5 ListingsItems で出品状態を確認中..."
+    from sp_api.api import ListingsItems as _ListingsItemsCheck
+    _listings_check_api = _ListingsItemsCheck(credentials=creds, marketplace=Marketplaces.JP)
+    buyable_skus: set = set()
+    check_skus = sorted(fba_items.keys())
+    for _i, _sku in enumerate(check_skus):
+        try:
+            _resp = _listings_check_api.get_listings_item(
+                sellerId=_seller_id(),
+                sku=_sku,
+                marketplaceIds=[_marketplace_id()],
+                includedData=["summaries"],
+            )
+            _summaries = getattr(_resp.payload, "summaries", []) or []
+            for _s in _summaries:
+                if getattr(_s, "status", "") == "BUYABLE":
+                    buyable_skus.add(_sku)
+                    break
+        except Exception:
+            pass
+        time.sleep(0.5)
+        if (_i + 1) % 10 == 0:
+            yield f"  {_i + 1}/{len(check_skus)} 完了 (BUYABLE={len(buyable_skus)})"
+    yield f"  → BUYABLE: {len(buyable_skus)} 件"
+
     # ── Step 4: Amazonベースで全SKUを確定（スプレッドシートは補足のみ） ──
     # Amazon側にある商品だけが対象。スプレッドシートだけの商品は除外。
     amazon_skus = set(fba_items) | set(inbound_skus) | set(sold_skus)
@@ -2819,17 +2848,18 @@ def run_create_summary_sheet(out_spreadsheet_id: str | None = None):
         # fulfillable_qty = 実際に販売可能な数量（total_qty はinbound含むため使わない）
         total_qty      = fba.get("total_qty", 0)
         fulfillable_qty = fba.get("fulfillable_qty", total_qty)  # detailsなしの場合はtotalで代替
-        if fulfillable_qty > 0:
+        if sku in buyable_skus:
+            # ListingsItems が BUYABLE と判定 → 確実に販売中
             status       = "販売中"
             listing_date = fba.get("last_updated", "")
             sold_date    = ""
         elif inbound:
-            # 仕入れ者がFBAへ送付中（seller-initiated inbound）→ 納品中
+            # 仕入れ者がFBAへ送付中 → 納品中
             status       = "納品中"
             listing_date = ""
             sold_date    = ""
-        elif total_qty > 0:
-            # FC間転送中（Amazon内部移動）→ まだBUYABLE扱い → 販売中
+        elif fulfillable_qty > 0 or total_qty > 0:
+            # Inventories APIで在庫あり（BUYABLEチェック失敗時のフォールバック）
             status       = "販売中"
             listing_date = fba.get("last_updated", "")
             sold_date    = ""
