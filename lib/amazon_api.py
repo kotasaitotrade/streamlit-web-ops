@@ -654,17 +654,25 @@ def _decide_buybox_target(a: dict, current: int, step: int, raise_step: int,
             return current, f"カート保持・値上げ余地なし→維持({current:,}円)"
         return target, f"カート保持→値上げ {current:,}→{target:,}円（上限{ceiling:,}）"
 
-    # カート未取得 → 奪取
+    # カート未取得 → 奪取（1回の実行で5%超は下げない）
+    _MAX_DROP = 0.05
+    _floor_5pct = math.ceil(current * (1 - _MAX_DROP))
+
+    def _cap(t: int, label: str) -> tuple[int, str]:
+        if t < _floor_5pct:
+            return _floor_5pct, label + f" → 5%キャップ適用 {_floor_5pct:,}円"
+        return t, label
+
     if cart is not None and a["cart_is_fba"] is False:
         # カート保持者が FBM → FBA なら同値で取りやすい（取得後は値上げフェーズで上げる）
         base = fbm if fbm is not None else cart
-        return base, f"未取得・カートFBM→同値で奪取 {base:,}円"
+        return _cap(base, f"未取得・カートFBM→同値で奪取 {base:,}円")
     if cart is not None:
         # カート保持者が FBA → 下回って奪取
-        return cart - step, f"未取得・カートFBA→カート-{step} {cart - step:,}円"
+        return _cap(cart - step, f"未取得・カートFBA→カート-{step} {cart - step:,}円")
     if fba is not None:
         # カート無し・FBA競合あり → FBA最安の少し下で奪取
-        return fba - step, f"未取得・FBA競合→FBA最安-{step} {fba - step:,}円"
+        return _cap(fba - step, f"未取得・FBA競合→FBA最安-{step} {fba - step:,}円")
     if fbm is not None:
         # カート無し・FBMのみ → FBA優位。安売りせず維持（次サイクルで様子見）
         return current, "未取得・FBMのみ→FBA優位のため維持（安売りしない）"
