@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -3266,8 +3267,12 @@ def run_auto_reprice():
             cur = int(float(price.replace(",", "").replace("¥", "")))
         except ValueError:
             continue
+        orig_m = re.search(r'ST(\d+)\d{6}$', sku)
+        orig   = int(orig_m.group(1)) if orig_m else None
+        floor  = math.ceil(orig * 0.95) if orig else 1
         targets.append({"sheet_row": i, "sku": sku, "asin": asin,
-                         "name": gc(row, _RC_NAME), "current": cur})
+                         "name": gc(row, _RC_NAME), "current": cur,
+                         "orig": orig, "floor": floor})
 
     yield f"  販売中: {len(targets)} 件"
 
@@ -3278,8 +3283,10 @@ def run_auto_reprice():
     lowered = raised = skipped = failed = 0
 
     for idx, t in enumerate(targets, 1):
-        cur = t["current"]
-        yield f"  [{idx}/{len(targets)}] {t['name'][:30]} | 現在={cur}円"
+        cur         = t["current"]
+        floor_price = t["floor"]
+        orig_price  = t["orig"]
+        yield f"  [{idx}/{len(targets)}] {t['name'][:30]} | 現在={cur}円 | 元値下限={floor_price}円"
 
         pricing = _reprice_fetch_pricing(products_api, t["asin"])
         time.sleep(_REPRICE_API_SLEEP)
@@ -3297,6 +3304,8 @@ def run_auto_reprice():
                 reason = f"カート価格{cart_price}円-1円が1円未満"
             elif target >= cur:
                 reason = f"現在価格({cur}円)≤目標({target}円) — 下げ不要"
+            elif target < floor_price:
+                reason = f"元値{orig_price}円の5%下限({floor_price}円)を下回るためスキップ"
             else:
                 diff = (cur - target) / cur
                 if diff <= _REPRICE_THRESHOLD:
