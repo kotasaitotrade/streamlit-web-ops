@@ -1883,15 +1883,15 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         return logs, b"", []
 
     # ─── ① 出品登録（FNSKU取得）──────────────────────────────
-    log("=== ① 出品登録（FNSKU取得）===")
+    log("=== ① 出品登録 ===")
     listings_api = ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
     items_for_pdf = []
 
-    for t in targets:
-        log(f"[{t['kanri_id']}] {t['sku']} 出品登録中...")
-        fnsku = ""
-        item_name = ""
-        if not dry_run:
+    if not dry_run:
+        # フェーズ1A: 全件まとめて登録
+        registered = []
+        for t in targets:
+            log(f"[{t['kanri_id']}] {t['sku']} 登録中...")
             try:
                 image_urls = _get_image_urls_for_kanri(t["kanri_id"])
                 body = _listing_body(
@@ -1904,31 +1904,66 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
                     sellerId=_seller_id(), sku=t["sku"],
                     marketplaceIds=[_marketplace_id()], body=body,
                 )
-                time.sleep(1)
-                fnsku, item_name = _get_fnsku(listings_api, t["sku"])
-                if not fnsku:
-                    log(f"  → FNSKU未取得。3秒後にリトライ...")
-                    time.sleep(3)
-                    fnsku, item_name = _get_fnsku(listings_api, t["sku"])
-                log(f"  → FNSKU: {fnsku or '未取得'}")
+                registered.append(t)
+                log(f"  → 登録OK")
             except Exception as e:
-                log(f"  → エラー: {e}")
-        else:
-            log(f"  → [DRY] ASIN={t['asin']} | {t['price']}円 | {t['condition_type']}")
-            fnsku = "X00000DRY"
+                log(f"  → 登録エラー: {e}")
+            time.sleep(1)
 
-        ct = t["condition_type"]
-        items_for_pdf.append({
-            "kanri_id":     t["kanri_id"],
-            "sku":          t["sku"],
-            "asin":         t["asin"],
-            "price":        t["price"],
-            "fnsku":        fnsku,
-            "item_name":    item_name,
-            "condition_type": ct,
-            "condition_jp": _CONDITION_JP.get(ct, ct),
-        })
-        time.sleep(0.5)
+        # フェーズ1B: 全件登録後にAmazon処理待ち
+        if registered:
+            log(f"全 {len(registered)} 件登録完了。Amazon処理待ち（25秒）...")
+            time.sleep(25)
+
+        # フェーズ1C: FNSKU一括取得（最大5回リトライ、10秒間隔）
+        log("=== FNSKU取得 ===")
+        fnsku_map: dict[str, tuple[str, str]] = {}
+        pending = list(registered)
+        for attempt in range(5):
+            still_pending = []
+            for t in pending:
+                fnsku, item_name = _get_fnsku(listings_api, t["sku"])
+                if fnsku:
+                    fnsku_map[t["sku"]] = (fnsku, item_name)
+                    log(f"[{t['kanri_id']}] FNSKU={fnsku}")
+                else:
+                    still_pending.append(t)
+            pending = still_pending
+            if not pending:
+                break
+            if attempt < 4:
+                log(f"FNSKU未取得 {len(pending)} 件。10秒後リトライ ({attempt+2}/5)...")
+                time.sleep(10)
+        for t in pending:
+            log(f"[{t['kanri_id']}] FNSKU未取得（スキップ）")
+
+        for t in targets:
+            fnsku, item_name = fnsku_map.get(t["sku"], ("", ""))
+            ct = t["condition_type"]
+            items_for_pdf.append({
+                "kanri_id":     t["kanri_id"],
+                "sku":          t["sku"],
+                "asin":         t["asin"],
+                "price":        t["price"],
+                "fnsku":        fnsku,
+                "item_name":    item_name,
+                "condition_type": ct,
+                "condition_jp": _CONDITION_JP.get(ct, ct),
+            })
+    else:
+        for t in targets:
+            log(f"[{t['kanri_id']}] [DRY] ASIN={t['asin']} | {t['price']}円 | {t['condition_type']}")
+            ct = t["condition_type"]
+            items_for_pdf.append({
+                "kanri_id":     t["kanri_id"],
+                "sku":          t["sku"],
+                "asin":         t["asin"],
+                "price":        t["price"],
+                "fnsku":        "X00000DRY",
+                "item_name":    "",
+                "condition_type": ct,
+                "condition_jp": _CONDITION_JP.get(ct, ct),
+            })
 
     # ─── ② FNSKUラベル PDF 生成 ──────────────────────────────
     log("=== ② FNSKUラベル PDF 生成 ===")
