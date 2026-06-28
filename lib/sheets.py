@@ -118,10 +118,15 @@ def ensure_sheets_initialized() -> list[str]:
 # ──────────────────────────────────────
 # users
 # ──────────────────────────────────────
-def get_user(email: str) -> dict | None:
+@st.cache_data(ttl=300)
+def _list_users() -> list[dict]:
+    """ユーザー一覧を5分キャッシュして返す（API読み取りクォータ対策）。"""
     ss = get_spreadsheet()
-    rows = ss.worksheet(USERS_SHEET).get_all_records()
-    for r in rows:
+    return ss.worksheet(USERS_SHEET).get_all_records()
+
+
+def get_user(email: str) -> dict | None:
+    for r in _list_users():
         if str(r.get("email", "")).strip().lower() == email.strip().lower():
             return r
     return None
@@ -186,16 +191,21 @@ def enqueue_job(user_email: str, tool_name: str, params: dict, worker_host: str)
     return job_id
 
 
-def list_jobs_for_user(user_email: str, limit: int = 50) -> list[dict]:
+@st.cache_data(ttl=15)
+def _list_jobs_raw() -> list[dict]:
+    """ジョブ一覧を15秒キャッシュして返す（ポーリング頻度の抑制）。"""
     ss = get_spreadsheet()
-    rows = ss.worksheet(JOBS_SHEET).get_all_records()
+    return ss.worksheet(JOBS_SHEET).get_all_records()
+
+
+def list_jobs_for_user(user_email: str, limit: int = 50) -> list[dict]:
+    rows = _list_jobs_raw()
     mine = [r for r in rows if str(r.get("user_email", "")).strip().lower() == user_email.strip().lower()]
     mine.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
     return mine[:limit]
 
 
 def list_all_jobs(limit: int = 100) -> list[dict]:
-    ss = get_spreadsheet()
-    rows = ss.worksheet(JOBS_SHEET).get_all_records()
-    rows.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
+    rows = _list_jobs_raw()
+    rows = sorted(rows, key=lambda r: r.get("requested_at", ""), reverse=True)
     return rows[:limit]
