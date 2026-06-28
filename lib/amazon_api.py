@@ -78,6 +78,8 @@ def _listing_body(asin: str, sku: str, price: int, condition_type: str,
                 {"currency": "JPY", "our_price": [{"schedule": [{"value_with_tax": float(price)}]}]}
             ],
             "supplier_declared_dg_hz_regulation": [{"value": "not_applicable"}],
+            "batteries_required":                  [{"value": "false"}],
+            "batteries_included":                  [{"value": "false"}],
         },
     }
     if condition_note:
@@ -1322,11 +1324,12 @@ def _move_sku_folder_to_bk(kanri_id: str) -> bool:
         return False
 
 
-def _get_image_urls_for_kanri(kanri_id: str) -> list[str]:
+def _get_image_urls_for_kanri(kanri_id: str, sku: str = "") -> list[str]:
     """管理IDフォルダ内の画像を公開設定にして URL リストを返す（最大6件）。
     Drive ファイルに "anyone reader" permission を付与し、
-    Amazon がダウンロードできる直接 URL を構築する。"""
-    folder_id = _find_image_folder(kanri_id)
+    Amazon がダウンロードできる直接 URL を構築する。
+    管理IDフォルダが見つからない場合はSKUフォルダにフォールバック（移行期対応）。"""
+    folder_id = _find_image_folder(kanri_id, sku)
     if not folder_id:
         return []
     images = _list_images(folder_id, max_count=6)
@@ -1345,12 +1348,18 @@ def _get_image_urls_for_kanri(kanri_id: str) -> list[str]:
     return urls
 
 
-def _find_image_folder(kanri_id: str):
-    q = (f"'{_drive_folder_id()}' in parents and name='{kanri_id}'"
-         " and mimeType='application/vnd.google-apps.folder' and trashed=false")
-    res = _drive_service().files().list(q=q, fields="files(id)").execute()
-    folders = res.get("files", [])
-    return folders[0]["id"] if folders else None
+def _find_image_folder(kanri_id: str, sku: str = ""):
+    """管理IDまたはSKU名のフォルダをDriveから検索する（移行期は両方試す）。"""
+    for name in [kanri_id, sku]:
+        if not name:
+            continue
+        q = (f"'{_drive_folder_id()}' in parents and name='{name}'"
+             " and mimeType='application/vnd.google-apps.folder' and trashed=false")
+        res = _drive_service().files().list(q=q, fields="files(id)").execute()
+        folders = res.get("files", [])
+        if folders:
+            return folders[0]["id"]
+    return None
 
 
 def _list_images(folder_id: str, max_count: int = 6) -> list[dict]:
@@ -1858,9 +1867,9 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
             price = int(float(price_str.replace(",", "").replace("¥", "")))
         except ValueError:
             continue
-        # Drive に画像がない管理IDはスキップ
+        # Drive に画像がない管理IDはスキップ（SKU名フォルダにもフォールバック）
         kanri_id = _cell(row, COL_KANRI_ID)
-        folder_id = _find_image_folder(kanri_id)
+        folder_id = _find_image_folder(kanri_id, sku)
         if not folder_id or not _list_images(folder_id, max_count=1):
             log(f"  [{kanri_id}] {sku} → Drive に画像なし。スキップ")
             continue
@@ -1893,7 +1902,7 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
         for t in targets:
             log(f"[{t['kanri_id']}] {t['sku']} 登録中...")
             try:
-                image_urls = _get_image_urls_for_kanri(t["kanri_id"])
+                image_urls = _get_image_urls_for_kanri(t["kanri_id"], t["sku"])
                 body = _listing_body(
                     asin=t["asin"], sku=t["sku"], price=t["price"],
                     condition_type=t["condition_type"],
