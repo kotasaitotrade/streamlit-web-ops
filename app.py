@@ -68,6 +68,7 @@ pages = [
     st.Page("pages/3_Amazon出品管理.py", title="Amazon出品管理", icon="📦", url_path="Amazon出品管理"),
     st.Page("pages/4_マニュアル.py", title="マニュアル", icon="📖", url_path="マニュアル"),
     st.Page("pages/5_価格管理.py", title="価格管理", icon="💴", url_path="価格管理"),
+    st.Page("pages/6_撮影・出品入力.py", title="撮影・出品入力", icon="📸", url_path="撮影出品入力"),
 ]
 pg = st.navigation(pages)
 pg.run()
