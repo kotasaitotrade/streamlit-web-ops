@@ -1745,10 +1745,7 @@ def _fba_create_plan_v2024(account_name: str, items: list, log_fn) -> dict | Non
             prep_map[d["msku"]] = d
     unknown_skus = [m for m, d in prep_map.items() if d.get("prepCategory", "UNKNOWN") == "UNKNOWN"]
     if unknown_skus:
-        log_fn(f"  ⚠️ 以下の SKU はプレップカテゴリが未設定です: {', '.join(unknown_skus)}")
-        log_fn("  → Seller Central で一度手動で FBA 納品プランを作成しプレップカテゴリを設定してください。")
-        log_fn("     https://sellercentral.amazon.co.jp/fba/inbound/index.html")
-        return None
+        log_fn(f"  ℹ️ プレップカテゴリ未設定 SKU: {len(unknown_skus)} 件（新規出品直後は未設定が正常。プラン作成を続行します）")
 
     # prepOwner は "NONE"（API が SELLER/AMAZON を拒否する）
     plan_items = [
@@ -2023,6 +2020,87 @@ def run_fba_inbound(account_name: str, dry_run: bool = True, spreadsheet_id=None
 
     log("=== 完了 ===")
     return logs, fnsku_pdf, plan_result_obj or {}
+
+
+def run_fba_plan_only(account_name: str, spreadsheet_id=None):
+    """3.発送待ち かつ V列(FBA出荷確認ID)が空 の商品に対して FBA 納品プランのみ作成。
+    出品登録・ラベル生成は行わない。prepCategory ブロックで失敗した際のリトライ用。
+    戻り値: (log_lines, plan_result_dict)
+    """
+    from sp_api.api import ListingsItems
+    from sp_api.base import Marketplaces
+
+    logs = []
+    def log(msg): logs.append(msg)
+
+    log("スプレッドシート読み込み中...")
+    all_rows = _read_rows("V", spreadsheet_id)
+
+    targets = []
+    for sheet_row, row in all_rows:
+        if _cell(row, COL_STATUS) != "3.発送待ち":
+            continue
+        if _cell(row, COL_SHIPMENT_ID):  # V列に FBA ID がある場合はスキップ
+            continue
+        sku = _cell(row, COL_SKU)
+        if not sku:
+            continue
+        targets.append({
+            "sheet_row": sheet_row,
+            "kanri_id":  _cell(row, COL_KANRI_ID),
+            "sku":       sku,
+        })
+
+    log(f"対象: {len(targets)} 件（3.発送待ち かつ FBA プランなし）")
+    if not targets:
+        log("対象なし。終了します。")
+        return logs, {}
+
+    # SP-API で FNSKU 取得
+    log("=== FNSKU 取得 ===")
+    api = ListingsItems(credentials=_sp_creds(), marketplace=Marketplaces.JP)
+    seller_id = _seller_id()
+    marketplace_id = _marketplace_id()
+
+    fba_items = []
+    for t in targets:
+        try:
+            res = api.get_listings_item(
+                sellerId=seller_id,
+                sku=t["sku"],
+                marketplaceIds=[marketplace_id],
+                includedData=["summaries"],
+            )
+            summaries = (res.payload or {}).get("summaries", [])
+            fnsku = summaries[0].get("fnSku", "") if summaries else ""
+            if fnsku:
+                log(f"  [{t['kanri_id']}] FNSKU={fnsku}")
+                fba_items.append({"sku": t["sku"], "fnsku": fnsku, "sheet_row": t["sheet_row"], "kanri_id": t["kanri_id"]})
+            else:
+                log(f"  [{t['kanri_id']}] FNSKU未取得（スキップ）")
+        except Exception as e:
+            log(f"  [{t['kanri_id']}] FNSKU取得エラー: {e}")
+
+    if not fba_items:
+        log("FNSKU取得済みアイテムなし。終了します。")
+        return logs, {}
+
+    # FBA 納品プラン作成
+    log("=== FBA 納品プラン作成 ===")
+    plan_result = _fba_create_plan_v2024(account_name, fba_items, log)
+
+    if plan_result:
+        conf_ids = plan_result.get("confirmation_ids", {})
+        fba_id = next(iter(conf_ids.values()), "")
+        for it in fba_items:
+            _update_cell(it["sheet_row"], "V", fba_id, spreadsheet_id)
+            log(f"  [{it['kanri_id']}] V列更新: {fba_id}")
+        log(f"✅ FBA 納品プラン作成完了: {plan_result.get('plan_id', '')}")
+    else:
+        log("⚠️ FBA プラン作成失敗。Seller Central から手動で作成してください。")
+        log("   https://sellercentral.amazon.co.jp/fba/sendtoamazon")
+
+    return logs, plan_result or {}
 
 
 # ============================================================

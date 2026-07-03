@@ -558,6 +558,29 @@ with tab5:
 
     st.divider()
 
+    # ── ① リトライ: FBA納品プランのみ再作成 ─────────────────────
+    st.markdown("#### ① リトライ: FBA納品プラン再作成（発送待ち・プランなし商品）")
+    st.caption("「3.発送待ち」かつ V列(FBA出荷確認ID)が空の商品に対して、FBA納品プランのみ再作成します。出品登録・ラベル生成は行いません。")
+    run_plan_retry = st.button("▶ FBA納品プラン再作成", key="run_plan_retry", use_container_width=True)
+    if run_plan_retry:
+        try:
+            with st.spinner("FBA納品プラン作成中..."):
+                logs_retry, plan_retry = amazon.run_fba_plan_only(
+                    account_name=account, spreadsheet_id=ss_id,
+                )
+        except Exception as e:
+            st.error(f"❌ エラーが発生しました: {e}")
+            logs_retry, plan_retry = [], {}
+        log_html_retry = "\n".join(logs_retry[-120:])
+        st.markdown(f'<div class="log-box">{log_html_retry}</div>', unsafe_allow_html=True)
+        if plan_retry and plan_retry.get("plan_id"):
+            st.success(f"✅ FBA納品プラン作成完了: {plan_retry['plan_id']}")
+            st.session_state["fba_plan_result"] = plan_retry
+            st.session_state.pop("fba_transport_options", None)
+            _get_status_counts.clear()
+
+    st.divider()
+
     # ── ② 輸送方法の選択・確定 ────────────────────────────────
     st.markdown("#### ② 輸送方法の選択・確定（⭐Amazon提携配送を既定に）")
     st.info(
