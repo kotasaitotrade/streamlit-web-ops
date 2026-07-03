@@ -427,7 +427,7 @@ with tab4:
         label_layout = st.selectbox(
             "ラベルのサイズ・面付け",
             _LABEL_LAYOUT_OPTIONS,
-            index=0,
+            index=3,
             key="label_layout",
             help="1面=A4に1ラベル(大・切り取り)。12/24/65面=A4に複数ラベルを面付け（ラベルシール/紙節約）。",
         )
@@ -485,7 +485,7 @@ with tab5:
     fba_label_layout = st.selectbox(
         "FNSKUラベルのサイズ・面付け",
         ["1面（大・1商品1ページ）", "12面 (2×6)", "21面 (3×7)", "24面 (3×8)", "65面 (5×13)"],
-        index=0, key="fba_label_layout",
+        index=3, key="fba_label_layout",
         help="生成されるFNSKUラベルPDFの面付け。FNSKUラベルタブと同じ選択肢です。",
     )
     c1, c2 = st.columns([1, 4])
