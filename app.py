@@ -70,6 +70,7 @@ pages = [
     st.Page("pages/5_価格管理.py", title="価格管理", icon="💴", url_path="価格管理"),
     st.Page("pages/6_撮影・出品入力.py", title="撮影・出品入力", icon="📸", url_path="撮影出品入力"),
     st.Page("pages/7_X投稿チェック.py", title="X投稿チェック", icon="📮", url_path="X投稿チェック"),
+    st.Page("pages/8_リプ返信チェック.py", title="リプ返信チェック", icon="💬", url_path="リプ返信チェック"),
 ]
 pg = st.navigation(pages)
 pg.run()
