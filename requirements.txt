@@ -10,4 +10,3 @@ python-barcode[images]>=0.15
 reportlab>=4.0
 Pillow>=10.0
 requests>=2.31
-requests-oauthlib>=1.3
