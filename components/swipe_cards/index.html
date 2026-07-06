@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *{box-sizing:border-box;font-family:-apple-system,"Hiragino Sans",sans-serif;-webkit-tap-highlight-color:transparent;margin:0;}
+  body{background:transparent;}
+  #wrap{max-width:460px;margin:0 auto;padding:4px;}
+  #counter{text-align:center;color:#555;font-size:14px;margin:4px 0;}
+  #stack{position:relative;height:340px;}
+  .card{position:absolute;inset:0;background:#fff;border:1px solid #e3e3e3;border-radius:18px;
+    box-shadow:0 8px 24px rgba(0,0,0,.10);padding:20px;display:flex;flex-direction:column;
+    touch-action:pan-y;will-change:transform;overflow:hidden;}
+  .cat{align-self:flex-start;background:#111;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;}
+  .txt{margin-top:14px;font-size:19px;line-height:1.7;color:#111;overflow-y:auto;flex:1;white-space:pre-wrap;}
+  .stamp{position:absolute;top:22px;font-size:30px;font-weight:900;padding:6px 14px;border-radius:12px;
+    border:4px solid;opacity:0;}
+  .yes{left:20px;color:#12b886;border-color:#12b886;transform:rotate(-14deg);}
+  .no{right:20px;color:#fa5252;border-color:#fa5252;transform:rotate(14deg);}
+  #hint{text-align:center;color:#aaa;font-size:13px;margin:8px 0;}
+  #btns{display:flex;gap:10px;justify-content:center;margin:6px 0;}
+  #btns button{flex:1;max-width:150px;padding:14px 0;border-radius:14px;border:1px solid #ddd;
+    background:#fff;font-size:16px;font-weight:700;}
+  #no{color:#fa5252;border-color:#ffc9c9;}
+  #yes{color:#12b886;border-color:#b2f2bb;}
+  #undo{max-width:90px;color:#666;font-weight:500;}
+  #save{width:100%;margin-top:10px;padding:15px 0;border:none;border-radius:14px;background:#1971c2;
+    color:#fff;font-size:17px;font-weight:800;}
+  #save:disabled{background:#adb5bd;}
+  #done{text-align:center;color:#12b886;font-weight:700;margin:8px 0;display:none;}
+</style></head>
+<body>
+<div id="wrap">
+  <div id="counter"></div>
+  <div id="stack"></div>
+  <div id="hint">← 廃棄　　採用 →</div>
+  <div id="btns">
+    <button id="no">◀ 廃棄</button>
+    <button id="undo">↩ 戻る</button>
+    <button id="yes">採用 ▶</button>
+  </div>
+  <div id="done">すべて仕分けました。「保存」を押してください。</div>
+  <button id="save">✅ 保存する（採用0・廃棄0）</button>
+</div>
+<script>
+// --- Streamlit 双方向コンポーネント protocol（ビルド不要の最小実装）---
+function send(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data), "*"); }
+const Streamlit = {
+  ready(){ send("streamlit:componentReady", {apiVersion:1}); },
+  setHeight(h){ send("streamlit:setFrameHeight", {height:h}); },
+  setValue(v){ send("streamlit:setComponentValue", {value:v, dataType:"json"}); },
+};
+let CARDS=[], order=[], decisions={}, history=[], nonce=0, rendered=false;
+window.addEventListener("message", (e)=>{
+  if(!e.data || e.data.type!=="streamlit:render") return;
+  if(rendered) return;               // 初回renderのみ構築（保存後の再renderで作り直さない）
+  CARDS = (e.data.args && e.data.args.cards) || [];
+  order = CARDS.slice(); rendered=true; render();
+});
+Streamlit.ready();
+
+const stack=document.getElementById('stack'), counter=document.getElementById('counter'), saveBtn=document.getElementById('save');
+function esc(t){return (t||'').replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));}
+function render(){
+  stack.innerHTML='';
+  const remain=order.filter(c=>!(c.id in decisions));
+  counter.textContent=`残り ${remain.length} 件 / 全 ${CARDS.length} 件`;
+  const top3=remain.slice(0,3).reverse();
+  top3.forEach((c,i)=>{
+    const el=document.createElement('div'); el.className='card'; el.dataset.id=c.id;
+    const depth=top3.length-1-i;
+    el.style.transform=`scale(${1-depth*0.04}) translateY(${depth*10}px)`; el.style.zIndex=i;
+    el.innerHTML=`<div class="cat">${esc(c.cat)}</div><div class="txt">${esc(c.text)}</div>
+      <div class="stamp yes">採用</div><div class="stamp no">廃棄</div>`;
+    stack.appendChild(el);
+  });
+  const a=Object.values(decisions).filter(v=>v==='a').length;
+  const s=Object.values(decisions).filter(v=>v==='s').length;
+  saveBtn.textContent=`✅ 保存する（採用${a}・廃棄${s}）`; saveBtn.disabled=(a+s)===0;
+  document.getElementById('done').style.display= remain.length===0 ? 'block':'none';
+  attachTop(); Streamlit.setHeight(document.body.scrollHeight+10);
+}
+function decide(id,act,dir){
+  const card=stack.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+  if(card){card.style.transition='transform .3s ease, opacity .3s';
+    card.style.transform=`translateX(${dir*600}px) rotate(${dir*30}deg)`; card.style.opacity=0;}
+  decisions[id]=act; history.push(id); setTimeout(render,180);
+}
+function attachTop(){
+  const cards=stack.querySelectorAll('.card'); const top=cards[cards.length-1]; if(!top) return;
+  const id=top.dataset.id; let sx=0,sy=0,dx=0,drag=false;
+  const yes=top.querySelector('.stamp.yes'), no=top.querySelector('.stamp.no');
+  top.addEventListener('pointerdown',e=>{drag=true;sx=e.clientX;sy=e.clientY;top.style.transition='none';top.setPointerCapture(e.pointerId);});
+  top.addEventListener('pointermove',e=>{ if(!drag)return; dx=e.clientX-sx; const dy=e.clientY-sy;
+    if(Math.abs(dx)<Math.abs(dy)&&Math.abs(dx)<8)return;
+    top.style.transform=`translateX(${dx}px) rotate(${dx/18}deg)`;
+    yes.style.opacity=Math.max(0,Math.min(1,dx/120)); no.style.opacity=Math.max(0,Math.min(1,-dx/120)); });
+  top.addEventListener('pointerup',()=>{ if(!drag)return; drag=false;
+    if(dx>90)decide(id,'a',1); else if(dx<-90)decide(id,'s',-1);
+    else{top.style.transition='transform .2s';top.style.transform='';yes.style.opacity=0;no.style.opacity=0;} });
+}
+document.getElementById('yes').onclick=()=>{const r=order.filter(c=>!(c.id in decisions))[0]; if(r)decide(r.id,'a',1);};
+document.getElementById('no').onclick=()=>{const r=order.filter(c=>!(c.id in decisions))[0]; if(r)decide(r.id,'s',-1);};
+document.getElementById('undo').onclick=()=>{const last=history.pop(); if(last){delete decisions[last]; render();}};
+saveBtn.onclick=()=>{ if(!Object.keys(decisions).length)return;
+  nonce++; Streamlit.setValue({decisions:decisions, nonce:Date.now()+'-'+nonce}); };
+</script>
+</body></html>
