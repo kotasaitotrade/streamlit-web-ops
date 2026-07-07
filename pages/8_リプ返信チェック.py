@@ -38,9 +38,15 @@ def _ws():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _all_values():
+    """シート全体を最大60秒キャッシュ（API読み取りの節約）。"""
+    return _ws().get_all_values()
+
+
 def load_queue():
     ws = _ws()
-    vals = ws.get_all_values()
+    vals = _all_values()
     if not vals:
         return ws, [], {}
     h = vals[0]
@@ -94,17 +100,20 @@ disabled = (len(selected) == 0) or (not confirm)
 
 if st.button(f"💬 選択した{len(selected)}件の返信を依頼", type="primary",
              use_container_width=True, disabled=disabled):
+    import gspread
     now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    ok = 0
+    cells, ok = [], 0
     for q in selected:
         text = st.session_state.get(f"rtxt_{q['id']}", q["draft"]).strip()
         if _wl(text) > 280:
             st.error(f"❌ 文字数超過のため除外：{text[:24]}…")
             continue
         if text != q["draft"]:
-            ws.update_cell(q["row"], idx["draft"] + 1, text)
-        ws.update_cell(q["row"], idx["post_request"] + 1, now)
+            cells.append(gspread.Cell(q["row"], idx["draft"] + 1, text))
+        cells.append(gspread.Cell(q["row"], idx["post_request"] + 1, now))
         ok += 1
+    if cells:
+        ws.update_cells(cells)  # まとめて1回で書込み
     st.success(f"✅ {ok}件の返信を依頼しました。数分以内にXへ返信されます。")
-    _ws.clear()
+    _all_values.clear()
     st.button("🔄 一覧を更新", on_click=st.rerun)
