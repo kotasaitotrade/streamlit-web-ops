@@ -53,6 +53,10 @@ def load_data():
                            "category": g("category") or "投稿", "draft": g("draft")})
         elif g("status") == "approved":
             queued += 1
+    # 日利は重要度が高いので常にチェックの先頭に（category=日利 or id=x-nichiri を優先）
+    def _is_nichiri(d):
+        return d["category"] == "日利" or str(d["id"]).startswith("x-nichiri")
+    drafts.sort(key=lambda d: 0 if _is_nichiri(d) else 1)
     return drafts, queued, idx
 
 
