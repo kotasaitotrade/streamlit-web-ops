@@ -14,5 +14,7 @@ _swipe = components.declare_component("swipe_cards", path=_DIR)
 
 
 def swipe_cards(cards, key=None, default=None):
-    """cards=[{id,cat,text}] を表示し、保存時に {decisions:{id:'a'|'s'}, nonce} を返す。"""
+    """cards=[{id,cat,text,img?}] を表示（img=画像URLがあれば表示）。
+    本文はカード内の「✏️編集」でその場修正できる。
+    保存時に {decisions:{id:'a'|'s'}, edits:{id:編集後本文}, nonce} を返す。"""
     return _swipe(cards=cards, key=key, default=default)

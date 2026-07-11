@@ -6,14 +6,23 @@
   body{background:transparent;}
   #wrap{max-width:460px;margin:0 auto;padding:4px;}
   #counter{text-align:center;color:#555;font-size:14px;margin:4px 0;}
-  #stack{position:relative;height:340px;}
+  #stack{position:relative;height:440px;}
   .card{position:absolute;inset:0;background:#fff;border:1px solid #e3e3e3;border-radius:18px;
-    box-shadow:0 8px 24px rgba(0,0,0,.10);padding:20px;display:flex;flex-direction:column;
+    box-shadow:0 8px 24px rgba(0,0,0,.10);padding:16px 18px;display:flex;flex-direction:column;
     touch-action:pan-y;will-change:transform;overflow:hidden;}
-  .cat{align-self:flex-start;background:#111;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;}
-  .txt{margin-top:14px;font-size:19px;line-height:1.7;color:#111;overflow-y:auto;flex:1;white-space:pre-wrap;}
+  .chead{display:flex;align-items:center;gap:8px;}
+  .cat{background:#111;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;}
+  .editbtn{margin-left:auto;background:#f1f3f5;border:1px solid #dee2e6;border-radius:20px;
+    padding:5px 12px;font-size:13px;font-weight:700;color:#333;}
+  .cardimg{width:100%;max-height:140px;object-fit:contain;border-radius:10px;margin-top:10px;background:#f8f9fa;}
+  .txt{margin-top:12px;font-size:18px;line-height:1.65;color:#111;overflow-y:auto;flex:1;white-space:pre-wrap;}
+  .edit{margin-top:12px;flex:1;width:100%;font-size:17px;line-height:1.6;padding:10px;
+    border:2px solid #1971c2;border-radius:10px;resize:none;touch-action:auto;font-family:inherit;}
+  .editing{touch-action:auto;}
+  .cnt{font-size:12px;color:#868e96;text-align:right;margin-top:4px;}
+  .cnt.over{color:#fa5252;font-weight:700;}
   .stamp{position:absolute;top:22px;font-size:30px;font-weight:900;padding:6px 14px;border-radius:12px;
-    border:4px solid;opacity:0;}
+    border:4px solid;opacity:0;pointer-events:none;}
   .yes{left:20px;color:#12b886;border-color:#12b886;transform:rotate(-14deg);}
   .no{right:20px;color:#fa5252;border-color:#fa5252;transform:rotate(14deg);}
   #hint{text-align:center;color:#aaa;font-size:13px;margin:8px 0;}
@@ -32,7 +41,7 @@
 <div id="wrap">
   <div id="counter"></div>
   <div id="stack"></div>
-  <div id="hint">← 廃棄　　採用 →</div>
+  <div id="hint">← 廃棄　　採用 →　（✏️で本文を編集）</div>
   <div id="btns">
     <button id="no">◀ 廃棄</button>
     <button id="undo">↩ 戻る</button>
@@ -49,7 +58,7 @@ const Streamlit = {
   setHeight(h){ send("streamlit:setFrameHeight", {height:h}); },
   setValue(v){ send("streamlit:setComponentValue", {value:v, dataType:"json"}); },
 };
-let CARDS=[], order=[], decisions={}, history=[], nonce=0, rendered=false;
+let CARDS=[], order=[], decisions={}, edits={}, history=[], nonce=0, rendered=false, editingId=null;
 window.addEventListener("message", (e)=>{
   if(!e.data || e.data.type!=="streamlit:render") return;
   if(rendered) return;               // 初回renderのみ構築（保存後の再renderで作り直さない）
@@ -59,7 +68,9 @@ window.addEventListener("message", (e)=>{
 Streamlit.ready();
 
 const stack=document.getElementById('stack'), counter=document.getElementById('counter'), saveBtn=document.getElementById('save');
-function esc(t){return (t||'').replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));}
+function esc(t){return (t||'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+function curText(c){ return (c.id in edits) ? edits[c.id] : c.text; }
+function wlen(t){ let n=0; for(const ch of (t||'')) n += ch.codePointAt(0)>0x2000 ? 2 : 1; return n; }
 function render(){
   stack.innerHTML='';
   const remain=order.filter(c=>!(c.id in decisions));
@@ -67,11 +78,31 @@ function render(){
   const top3=remain.slice(0,3).reverse();
   top3.forEach((c,i)=>{
     const el=document.createElement('div'); el.className='card'; el.dataset.id=c.id;
-    const depth=top3.length-1-i;
+    const depth=top3.length-1-i; const isTop=(i===top3.length-1);
     el.style.transform=`scale(${1-depth*0.04}) translateY(${depth*10}px)`; el.style.zIndex=i;
-    el.innerHTML=`<div class="cat">${esc(c.cat)}</div><div class="txt">${esc(c.text)}</div>
-      <div class="stamp yes">採用</div><div class="stamp no">廃棄</div>`;
-    stack.appendChild(el);
+    const img = c.img ? `<img class="cardimg" src="${esc(c.img)}" onerror="this.style.display='none'">` : '';
+    if(isTop && editingId===c.id){
+      const t=curText(c); const wl=wlen(t);
+      el.classList.add('editing');
+      el.innerHTML=`<div class="chead"><div class="cat">${esc(c.cat)}</div>
+        <button class="editbtn" data-act="done">✅ 完了</button></div>${img}
+        <textarea class="edit">${esc(t)}</textarea>
+        <div class="cnt${wl>280?' over':''}">文字数 ${wl}/280</div>`;
+      stack.appendChild(el);
+      const ta=el.querySelector('.edit'), cnt=el.querySelector('.cnt');
+      ta.addEventListener('input',()=>{ edits[c.id]=ta.value; const w=wlen(ta.value);
+        cnt.textContent=`文字数 ${w}/280`; cnt.className='cnt'+(w>280?' over':''); });
+      el.querySelector('[data-act="done"]').onclick=()=>{ edits[c.id]=ta.value; editingId=null; render(); };
+      setTimeout(()=>ta.focus(),30);
+    } else {
+      const editBtn = isTop ? `<button class="editbtn" data-act="edit">✏️ 編集</button>` : '';
+      el.innerHTML=`<div class="chead"><div class="cat">${esc(c.cat)}</div>${editBtn}</div>${img}
+        <div class="txt">${esc(curText(c))}</div>
+        <div class="stamp yes">採用</div><div class="stamp no">廃棄</div>`;
+      stack.appendChild(el);
+      const eb=el.querySelector('[data-act="edit"]');
+      if(eb) eb.onclick=(ev)=>{ ev.stopPropagation(); editingId=c.id; render(); };
+    }
   });
   const a=Object.values(decisions).filter(v=>v==='a').length;
   const s=Object.values(decisions).filter(v=>v==='s').length;
@@ -80,28 +111,31 @@ function render(){
   attachTop(); Streamlit.setHeight(document.body.scrollHeight+10);
 }
 function decide(id,act,dir){
+  if(editingId) return;              // 編集中はスワイプ確定しない
   const card=stack.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
   if(card){card.style.transition='transform .3s ease, opacity .3s';
     card.style.transform=`translateX(${dir*600}px) rotate(${dir*30}deg)`; card.style.opacity=0;}
   decisions[id]=act; history.push(id); setTimeout(render,180);
 }
 function attachTop(){
+  if(editingId) return;              // 編集中はドラッグ無効
   const cards=stack.querySelectorAll('.card'); const top=cards[cards.length-1]; if(!top) return;
   const id=top.dataset.id; let sx=0,sy=0,dx=0,drag=false;
   const yes=top.querySelector('.stamp.yes'), no=top.querySelector('.stamp.no');
-  top.addEventListener('pointerdown',e=>{drag=true;sx=e.clientX;sy=e.clientY;top.style.transition='none';top.setPointerCapture(e.pointerId);});
+  top.addEventListener('pointerdown',e=>{ if(e.target.closest('.editbtn'))return;
+    drag=true;sx=e.clientX;sy=e.clientY;top.style.transition='none';top.setPointerCapture(e.pointerId);});
   top.addEventListener('pointermove',e=>{ if(!drag)return; dx=e.clientX-sx; const dy=e.clientY-sy;
     if(Math.abs(dx)<Math.abs(dy)&&Math.abs(dx)<8)return;
     top.style.transform=`translateX(${dx}px) rotate(${dx/18}deg)`;
-    yes.style.opacity=Math.max(0,Math.min(1,dx/120)); no.style.opacity=Math.max(0,Math.min(1,-dx/120)); });
+    if(yes)yes.style.opacity=Math.max(0,Math.min(1,dx/120)); if(no)no.style.opacity=Math.max(0,Math.min(1,-dx/120)); });
   top.addEventListener('pointerup',()=>{ if(!drag)return; drag=false;
     if(dx>90)decide(id,'a',1); else if(dx<-90)decide(id,'s',-1);
-    else{top.style.transition='transform .2s';top.style.transform='';yes.style.opacity=0;no.style.opacity=0;} });
+    else{top.style.transition='transform .2s';top.style.transform='';if(yes)yes.style.opacity=0;if(no)no.style.opacity=0;} });
 }
 document.getElementById('yes').onclick=()=>{const r=order.filter(c=>!(c.id in decisions))[0]; if(r)decide(r.id,'a',1);};
 document.getElementById('no').onclick=()=>{const r=order.filter(c=>!(c.id in decisions))[0]; if(r)decide(r.id,'s',-1);};
 document.getElementById('undo').onclick=()=>{const last=history.pop(); if(last){delete decisions[last]; render();}};
 saveBtn.onclick=()=>{ if(!Object.keys(decisions).length)return;
-  nonce++; Streamlit.setValue({decisions:decisions, nonce:Date.now()+'-'+nonce}); };
+  nonce++; Streamlit.setValue({decisions:decisions, edits:edits, nonce:Date.now()+'-'+nonce}); };
 </script>
 </body></html>
