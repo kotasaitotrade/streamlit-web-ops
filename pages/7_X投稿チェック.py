@@ -56,7 +56,7 @@ def load_data():
         return [], 0, {}
     h = vals[0]
     idx = {name: (h.index(name) if name in h else -1) for name in
-           ("id", "category", "type", "draft", "status", "tweet_id", "image_url")}
+           ("id", "category", "type", "draft", "status", "tweet_id", "image_url", "source")}
     drafts, queued = [], 0
     for rnum, r in enumerate(vals[1:], start=2):
         g = lambda name: (r[idx[name]] if 0 <= idx[name] < len(r) else "")
@@ -81,6 +81,7 @@ def apply_decisions(idx, id2info, decisions, edits):
     import gspread
     st_col = idx["status"] + 1
     dr_col = idx["draft"] + 1
+    src_col = idx["source"] + 1 if idx.get("source", -1) >= 0 else 0
     cells, adopted, skipped, edited = [], 0, 0, 0
     for pid, act in decisions.items():
         info = id2info.get(pid)
@@ -91,6 +92,9 @@ def apply_decisions(idx, id2info, decisions, edits):
         new = (edits or {}).get(pid)
         if act == "a" and new is not None and new.strip() and new != info["draft"]:
             cells.append(gspread.Cell(r, dr_col, new))
+            # ✏️編集して採用＝「こう書きたい」見本。生成が文体を寄せるための印を付ける
+            if src_col:
+                cells.append(gspread.Cell(r, src_col, "✏️編集採用(見本)"))
             edited += 1
         adopted += act == "a"
         skipped += act == "s"
