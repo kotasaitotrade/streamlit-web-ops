@@ -36,18 +36,39 @@ def _all_values():
     return _ws().get_all_values()
 
 
+import base64
 import re
 
+import requests
 
-def _img_view(url):
-    """Google Drive の共有URLを <img> で確実に表示できるサムネイル形式に変換。
-    それ以外のURLはそのまま返す。空なら空文字。"""
+
+def _thumb_url(url):
+    """Google Drive の共有URLを、画像として取得できるサムネイル形式に変換。"""
     if not url:
         return ""
     m = re.search(r"(?:id=|/d/)([\w-]{20,})", url)
     if m:
-        return f"https://drive.google.com/thumbnail?id={m.group(1)}&sz=w1000"
+        return f"https://drive.google.com/thumbnail?id={m.group(1)}&sz=w800"
     return url
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _img_data_uri(url):
+    """画像をサーバー側で取得して data URI で返す。
+    ★スワイプUIは Streamlit のサンドボックス iframe 内で動くため、Drive等の外部URLを
+      <img src> に直接入れるとクロスオリジンで表示されないことがある。ここで実体を取り込み、
+      HTMLに data URI として埋め込む（＝確実に表示される）。失敗時はサムネイルURLにフォールバック。"""
+    turl = _thumb_url(url)
+    if not turl:
+        return ""
+    try:
+        r = requests.get(turl, timeout=15)
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
+            b64 = base64.b64encode(r.content).decode()
+            return f"data:{r.headers['content-type']};base64,{b64}"
+    except Exception:  # noqa: BLE001
+        pass
+    return turl  # 取得失敗時は素のサムネイルURL（表示されない可能性はあるが空よりまし）
 
 
 def load_data():
@@ -65,7 +86,7 @@ def load_data():
         if g("status") == "draft":
             drafts.append({"row": rnum, "id": g("id"),
                            "category": g("category") or "投稿", "draft": g("draft"),
-                           "img": _img_view(g("image_url"))})
+                           "img": _img_data_uri(g("image_url"))})
         elif g("status") == "approved":
             queued += 1
     # 日利は重要度が高いので常にチェックの先頭に（category=日利 or id=x-nichiri を優先）
