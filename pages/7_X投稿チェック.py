@@ -48,7 +48,9 @@ def _img_view(url):
         return ""
     m = re.search(r"(?:id=|/d/)([\w-]{20,})", url)
     if m:
-        return f"https://drive.google.com/thumbnail?id={m.group(1)}&sz=w640"
+        # lh3 直リンク（200を直接返す）。drive.google.com/thumbnail は302リダイレクト方式で
+        # iframe内だと失敗→onerrorで非表示に固定されることがあるため、直リンクに変更。
+        return f"https://lh3.googleusercontent.com/d/{m.group(1)}=w640"
     return url
 
 
