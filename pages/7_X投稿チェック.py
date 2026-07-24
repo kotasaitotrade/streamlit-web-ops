@@ -16,10 +16,12 @@ import streamlit as st
 from lib.sheets import get_client, materialize_secrets
 from lib.auth import require_login, logout_button
 from lib.swipe import swipe_cards
+from lib.pwa import add_to_home_screen
 
 materialize_secrets()
 user = require_login()
 logout_button()
+add_to_home_screen("X投稿チェック")   # スマホの「ホーム画面に追加」でアプリ風に開ける
 
 SNS_SPREADSHEET_ID = "1jqpjM7bujJVm9uh7Hz85nvSWZdFFWp942mMltXBC_T8"  # 「SNS集客」
 WS_NAME = "x_posts"
@@ -122,6 +124,38 @@ if queued:
 if not drafts:
     st.success("チェック待ちの投稿ネタはありません。")
     st.stop()
+
+
+def _attach_image_ui():
+    """ドラフトに実写真を添付する。写真→Drive公開URL化→該当行のimage_urlに書込み。
+    Threads公式APIは公開URLの画像しか貼れないため、Driveで公開URLにしてから紐づける。"""
+    if idx.get("image_url", -1) < 0:
+        return  # image_url列が無いシートでは出さない
+    with st.expander("📷 写真を添付（実物・本人撮影のみ）"):
+        no_img = [d for d in drafts if not d.get("img")]
+        if not no_img:
+            st.caption("画像未設定のドラフトはありません。")
+            return
+        opt = {f'{d["category"]}｜{d["draft"][:24]}…': d for d in no_img}
+        label = st.selectbox("写真をつけるドラフト", list(opt.keys()))
+        up = st.file_uploader("写真を選ぶ（JPG / PNG）", type=["jpg", "jpeg", "png"])
+        if up is not None:
+            st.image(up, width=240, caption="プレビュー")
+        if st.button("アップロードして添付", disabled=(up is None)):
+            from lib.drive import upload_image_public
+            d = opt[label]
+            try:
+                with st.spinner("アップロード中…"):
+                    url = upload_image_public(up.name, up.getvalue())
+                    _ws().update_cell(d["row"], idx["image_url"] + 1, url)
+                _all_values.clear()  # キャッシュ破棄→カードに反映
+                st.success("写真を添付しました。下のカードに反映されます。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"アップロードに失敗しました：{e}")
+
+
+_attach_image_ui()
 
 cards = [{"id": d["id"], "cat": d["category"], "text": d["draft"], "img": d.get("img", "")}
          for d in drafts]
