@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import streamlit as st
 
+# ★このページの<title>を「投稿チェック」に（iOS/Androidの「ホーム画面に追加」名はこれを使う）。
+#   set_page_config は最初のStreamlit呼び出しである必要があるため、他のst処理より前に置く。
+st.set_page_config(page_title="投稿チェック", page_icon="📮", layout="wide")
+
 from lib.sheets import get_client, materialize_secrets
 from lib.auth import require_login, logout_button
 from lib.swipe import swipe_cards
