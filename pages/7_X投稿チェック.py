@@ -73,9 +73,11 @@ def load_data():
         if g("type") != "original" or g("tweet_id"):
             continue
         if g("status") == "draft":
+            # image_url は "|" 区切りで複数枚を許容（分析カード＋オフモール売切ページ等）
+            _imgs = [_img_view(u) for u in g("image_url").split("|") if u.strip()]
             drafts.append({"row": rnum, "id": g("id"),
                            "category": g("category") or "投稿", "draft": g("draft"),
-                           "img": _img_view(g("image_url"))})
+                           "img": _imgs[0] if _imgs else "", "imgs": _imgs})
         elif g("status") == "approved":
             queued += 1
     # 日利は重要度が高いので常にチェックの先頭に（category=日利 or id=x-nichiri を優先）

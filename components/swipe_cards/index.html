@@ -14,7 +14,8 @@
   .cat{background:#111;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;}
   .editbtn{margin-left:auto;background:#f1f3f5;border:1px solid #dee2e6;border-radius:20px;
     padding:5px 12px;font-size:13px;font-weight:700;color:#333;}
-  .cardimg{width:100%;max-height:140px;object-fit:contain;border-radius:10px;margin-top:10px;background:#f8f9fa;}
+  .cardimgs{display:flex;gap:6px;margin-top:10px;}
+  .cardimg{flex:1;min-width:0;max-height:150px;object-fit:contain;border-radius:10px;background:#f8f9fa;}
   .txt{margin-top:12px;font-size:18px;line-height:1.65;color:#111;overflow-y:auto;flex:1;white-space:pre-wrap;}
   .edit{margin-top:12px;flex:1;width:100%;font-size:17px;line-height:1.6;padding:10px;
     border:2px solid #1971c2;border-radius:10px;resize:none;touch-action:auto;font-family:inherit;}
@@ -80,7 +81,8 @@ function render(){
     const el=document.createElement('div'); el.className='card'; el.dataset.id=c.id;
     const depth=top3.length-1-i; const isTop=(i===top3.length-1);
     el.style.transform=`scale(${1-depth*0.04}) translateY(${depth*10}px)`; el.style.zIndex=i;
-    const img = c.img ? `<img class="cardimg" src="${esc(c.img)}" onerror="this.style.display='none'">` : '';
+    const _imgs = (c.imgs && c.imgs.length) ? c.imgs : (c.img ? [c.img] : []);
+    const img = _imgs.length ? `<div class="cardimgs">${_imgs.map(u=>`<img class="cardimg" src="${esc(u)}" onerror="this.style.display='none'">`).join('')}</div>` : '';
     if(isTop && editingId===c.id){
       const t=curText(c); const wl=wlen(t);
       el.classList.add('editing');
