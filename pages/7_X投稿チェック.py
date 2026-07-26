@@ -163,7 +163,8 @@ def _attach_image_ui():
 
 _attach_image_ui()
 
-cards = [{"id": d["id"], "cat": d["category"], "text": d["draft"], "img": d.get("img", "")}
+cards = [{"id": d["id"], "cat": d["category"], "text": d["draft"],
+          "img": d.get("img", ""), "imgs": d.get("imgs", [])}
          for d in drafts]
 result = swipe_cards(cards=cards, default=None)
 
