@@ -10,7 +10,7 @@ import os
 import streamlit.components.v1 as components
 
 _DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "components", "swipe_cards")
-_swipe = components.declare_component("swipe_cards", path=_DIR)
+_swipe = components.declare_component("swipe_cards_v2", path=_DIR)  # v2: 複数画像対応＋キャッシュ無効化
 
 
 def swipe_cards(cards, key=None, default=None):
