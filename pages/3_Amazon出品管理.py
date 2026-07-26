@@ -42,10 +42,12 @@ st.caption("ASIN自動取得 / 価格調整 / FNSKUラベル生成 / FBA納品�
 ACCOUNTS = {
     "sato": "1Xb66vv997dWX9CIofuPNY23tuIQwoNFmm-hNBLbnBYo",
     "kudo": "1keLLdpDRu2l9AjHyM6qRe_W8FFH_Jtl-isb1XFp8MzA",
+    "kota": "1SKRIPf38mv3ZzYnA4hFAmSVk6H5qYrzunfmFCGuqk0M",
 }
 ACCOUNT_LABELS = {
     "sato": "sato（佐藤さん）",
     "kudo": "kudo（工藤さん）",
+    "kota": "kota（コウタさん）",
 }
 
 def _reset_confirm_flags():
