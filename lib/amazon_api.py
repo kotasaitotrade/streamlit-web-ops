@@ -1459,10 +1459,15 @@ def _draw_grid_page(c, items: list, today: str, cols: int, rows: int):
         y_bottom = H - margin - (row + 1) * ch
         cx = x0 + cw / 2
 
+        # 管理ID（セル最上部・商品照合用）
+        c.setFont(FONT, fs_small)
+        c.setFillColorRGB(0.15, 0.15, 0.15)
+        c.drawCentredString(cx, y_bottom + ch - pad - fs_small, item.get("kanri_id", ""))
+
         bc_w = cw - 2 * pad
-        bc_h = ch * 0.42
+        bc_h = ch * 0.38
         bc_x = x0 + pad
-        bc_y = y_bottom + ch - pad - bc_h
+        bc_y = y_bottom + ch - pad - fs_small * 1.5 - bc_h
         if item.get("fnsku"):
             try:
                 c.drawImage(ImageReader(_barcode_png(item["fnsku"])), bc_x, bc_y,
