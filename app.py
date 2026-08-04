@@ -60,19 +60,20 @@ def home():
 
 
 # ── ログイン＆ロール判定（ナビ構築の前に）──
-# role=x_reviewer の担当者（例: ちーさん）は「X投稿チェック」だけを表示する。
-# ナビに載せないページは st.navigation のルータにも登録されないため、
-# URL直打ちでも到達できない（＝サイドバーから隠すだけの見た目制限ではなく実効的なアクセス制限）。
+# role=x_reviewer の担当者（例: ちー・koutaiwi）は「X投稿チェック（2）」だけを表示する。
+# これは pages/9（ちー垢用・台帳タブ x_posts_chii）で、こうたの元ページ pages/7 とは
+# 完全に別スペース・別URL。ナビに載せないページは st.navigation のルータにも登録されない
+# ため、URL直打ちでも到達できない（見た目だけの制限ではなく実効的なアクセス制限）。
 X_REVIEWER_ROLES = {"x_reviewer", "x投稿チェック"}
 
 _user = require_login()   # 未ログインならここでログイン画面を出して停止
 _role = str(_user.get("role", "")).strip().lower()
 
 if _role in X_REVIEWER_ROLES:
-    # X投稿チェック専用ユーザー：このページ1枚だけ（他の業務ページは非表示・到達不可）
+    # X投稿チェック専任ユーザー：ちー垢用の別ページ1枚だけ（こうたの元ページ7には触れない）
     pages = [
-        st.Page("pages/7_X投稿チェック.py", title="X投稿チェック", icon="📮",
-                url_path="X投稿チェック", default=True),
+        st.Page("pages/9_X投稿チェック2.py", title="X投稿チェック", icon="📮",
+                url_path="X投稿チェック2", default=True),
     ]
 else:
     # 通常ユーザー（admin 等）：全ページ表示
@@ -86,6 +87,7 @@ else:
         st.Page("pages/5_価格管理.py", title="価格管理", icon="💴", url_path="価格管理"),
         st.Page("pages/6_撮影・出品入力.py", title="撮影・出品入力", icon="📸", url_path="撮影出品入力"),
         st.Page("pages/7_X投稿チェック.py", title="X投稿チェック", icon="📮", url_path="X投稿チェック"),
+        st.Page("pages/9_X投稿チェック2.py", title="X投稿チェック（2・ちー垢）", icon="📮", url_path="X投稿チェック2"),
         st.Page("pages/8_リプ返信チェック.py", title="リプ返信チェック", icon="💬", url_path="リプ返信チェック"),
     ]
 
