@@ -72,8 +72,8 @@ _role = str(_user.get("role", "")).strip().lower()
 if _role in X_REVIEWER_ROLES:
     # X投稿チェック専任ユーザー：ちー垢用の別ページ1枚だけ（こうたの元ページ7には触れない）
     pages = [
-        st.Page("pages/9_X投稿チェック2.py", title="X投稿チェック", icon="📮",
-                url_path="X投稿チェック2", default=True),
+        st.Page("pages/9_X投稿チェック2.py", title="ちーさん", icon="📮",
+                url_path="ちーさん", default=True),
     ]
 else:
     # 通常ユーザー（admin 等）：全ページ表示
@@ -87,7 +87,7 @@ else:
         st.Page("pages/5_価格管理.py", title="価格管理", icon="💴", url_path="価格管理"),
         st.Page("pages/6_撮影・出品入力.py", title="撮影・出品入力", icon="📸", url_path="撮影出品入力"),
         st.Page("pages/7_X投稿チェック.py", title="X投稿チェック", icon="📮", url_path="X投稿チェック"),
-        st.Page("pages/9_X投稿チェック2.py", title="X投稿チェック（2・ちー垢）", icon="📮", url_path="X投稿チェック2"),
+        st.Page("pages/9_X投稿チェック2.py", title="ちーさん", icon="📮", url_path="ちーさん"),
         st.Page("pages/8_リプ返信チェック.py", title="リプ返信チェック", icon="💬", url_path="リプ返信チェック"),
     ]
 

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-# ★このページの<title>を「投稿チェック2」に（iOS/Androidの「ホーム画面に追加」名はこれを使う）。
-st.set_page_config(page_title="投稿チェック2", page_icon="📮", layout="wide")
+# ★このページの<title>を「ちーさん」に（iOS/Androidの「ホーム画面に追加」名はこれを使う）。
+st.set_page_config(page_title="ちーさん", page_icon="📮", layout="wide")
 
 from lib.sheets import get_client, materialize_secrets
 from lib.auth import require_login, logout_button
@@ -19,7 +19,7 @@ from lib.pwa import add_to_home_screen
 materialize_secrets()
 user = require_login()
 logout_button()
-add_to_home_screen("X投稿チェック2")   # スマホの「ホーム画面に追加」でアプリ風に開ける
+add_to_home_screen("ちーさん")   # スマホの「ホーム画面に追加」でアプリ風に開ける
 
 SNS_SPREADSHEET_ID = "1jqpjM7bujJVm9uh7Hz85nvSWZdFFWp942mMltXBC_T8"  # 「SNS集客」
 WS_NAME = "x_posts_chii"   # ★ちー垢用の別台帳タブ（こうたの x_posts とは分離）
@@ -100,7 +100,7 @@ def apply_decisions(idx, id2info, decisions, edits):
     return adopted, skipped, edited
 
 
-st.title("📮 X投稿チェック（2）")
+st.title("📮 ちーさん")
 
 msg = st.session_state.pop("swipe_msg", None)
 if msg:
