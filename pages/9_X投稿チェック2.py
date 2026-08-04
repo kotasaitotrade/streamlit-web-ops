@@ -26,14 +26,16 @@ WS_NAME = "x_posts_chii"   # ★ちー垢用の別台帳タブ（こうたの x_
 
 
 @st.cache_resource(show_spinner=False)
-def _ws():
+def _ws_chii():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _all_values():
-    """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。"""
-    return _ws().get_all_values()
+def _all_values_chii():
+    """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。
+    ★関数名は page7 と重複させない：@st.cache_* は全セッション共有・関数名でキーされるため、
+      同名だと page7(x_posts) の結果を page9(x_posts_chii) が使い回してしまう（タブ取り違え事故）。"""
+    return _ws_chii().get_all_values()
 
 
 import re
@@ -50,7 +52,7 @@ def _img_view(url):
 
 
 def load_data():
-    vals = _all_values()
+    vals = _all_values_chii()
     if not vals:
         return [], 0, {}
     h = vals[0]
@@ -96,7 +98,7 @@ def apply_decisions(idx, id2info, decisions, edits):
         adopted += act == "a"
         skipped += act == "s"
     if cells:
-        _ws().update_cells(cells)
+        _ws_chii().update_cells(cells)
     return adopted, skipped, edited
 
 
@@ -137,8 +139,8 @@ def _attach_image_ui():
             try:
                 with st.spinner("アップロード中…"):
                     url = upload_image_public(up.name, up.getvalue())
-                    _ws().update_cell(d["row"], idx["image_url"] + 1, url)
-                _all_values.clear()
+                    _ws_chii().update_cell(d["row"], idx["image_url"] + 1, url)
+                _all_values_chii.clear()
                 st.success("写真を添付しました。下のカードに反映されます。")
                 st.rerun()
             except Exception as e:
@@ -158,5 +160,5 @@ if result and isinstance(result, dict) and result.get("nonce") != st.session_sta
     a, s, e = apply_decisions(idx, id2info, result.get("decisions", {}), result.get("edits", {}))
     edited_note = f"／✏️ 編集反映 {e}件" if e else ""
     st.session_state["swipe_msg"] = f"✅ 採用 {a}件（ドリップに追加）／🗑 廃棄 {s}件{edited_note}"
-    _all_values.clear()
+    _all_values_chii.clear()
     st.rerun()
