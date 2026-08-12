@@ -25,7 +25,8 @@ MAX_AGE_MIN = 6 * 60   # 元ツイートがこれ以上前なら表示しない�
 PERSONA = ("🧑 引用ペルソナ：**会社員SE・2児パパ**／6人の外注チーム＋自作ツールで物販を仕組み化。"
            "淡々・気合より仕組み・上から教えない。")
 
-SRC_LABEL = {"mention": "💬 自分宛リプ", "hunter": "🗣 リプ営業", "finder_browser": "🗣 リプ営業"}
+SRC_LABEL = {"mention": "💬 自分宛リプ", "hunter": "🗣 引用RT", "finder_browser": "🗣 引用RT",
+             "follower": "👥 フォロワー"}
 
 
 def _wl(text: str) -> int:
@@ -101,7 +102,9 @@ def load_queue():
                      "draft": g("draft"), "age_min": age,
                      "likes": _int(g("likes")), "views": _int(g("views")),
                      "requested": bool(g("post_request").strip())})
-    rows.sort(key=lambda q: (q["age_min"] if q["age_min"] is not None else 9e9))  # 新しい順
+    # フォロワーの投稿を最優先、その中で新しい順
+    rows.sort(key=lambda q: (0 if q["source"] == "follower" else 1,
+                             q["age_min"] if q["age_min"] is not None else 9e9))
     return ws, rows, idx
 
 
