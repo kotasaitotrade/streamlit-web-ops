@@ -36,7 +36,7 @@ def _ws():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def _all_values():
     """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。"""
     return _ws().get_all_values()
@@ -122,6 +122,8 @@ if msg:
     st.success(msg)
 
 st.caption("右スワイプ＝採用（ドリップに追加）／左スワイプ＝廃棄。✏️で本文を編集できます。採用分は1日約10件・時間をばらして順次投稿されます。")
+if st.button("🔄 最新を再取得", use_container_width=True):
+    _all_values.clear(); st.rerun()
 
 drafts, queued, idx = load_data()
 if queued:
@@ -129,6 +131,15 @@ if queued:
 
 if not drafts:
     st.success("チェック待ちの投稿ネタはありません。")
+    with st.expander("🔍 表示されない時（デバッグ）"):
+        _v = _all_values()
+        st.write(f"シート総行: {len(_v)}行")
+        if _v:
+            _h = _v[0]
+            _si = _h.index("status") if "status" in _h else -1
+            from collections import Counter
+            _cnt = Counter(r[_si] for r in _v[1:] if _si >= 0 and len(r) > _si)
+            st.write("status別:", dict(_cnt))
     st.stop()
 
 
