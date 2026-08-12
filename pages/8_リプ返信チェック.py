@@ -136,7 +136,11 @@ for q in queue:
         st.markdown(top)
         st.markdown(f"> {q['target_text'][:220]}")
         if q["target_img"]:
-            st.image(q["target_img"], width=280)
+            # st.image は外部URLで例外を投げることがあるので、素の<img>で安全に埋め込む
+            st.markdown(
+                f'<img src="{q["target_img"]}" style="max-width:280px;width:100%;'
+                f'border-radius:10px;margin:4px 0;" referrerpolicy="no-referrer">',
+                unsafe_allow_html=True)
         text = st.text_area("返信文（編集可）", value=q["draft"], key=f"rtxt_{q['id']}",
                             height=110, label_visibility="collapsed", disabled=q["requested"])
         wl = _wl(text or "")
