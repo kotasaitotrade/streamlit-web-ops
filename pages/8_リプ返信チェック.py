@@ -174,7 +174,9 @@ for q in queue:
         if eng:
             top += "　" + "　".join(eng)
         st.markdown(top)
-        st.markdown(f"> {q['target_text'][:220]}")
+        # 相手の投稿は全文表示（引用符付きで各行を見やすく）
+        _tt = (q["target_text"] or "").strip()
+        st.markdown("\n".join(f"> {ln}" for ln in _tt.split("\n")) if _tt else "> （本文なし）")
         if q["target_url"]:
             st.markdown(f"🔗 **[Xで元のポストを開く]({q['target_url']})**")
         if q["target_img"]:
@@ -187,20 +189,17 @@ for q in queue:
         text = st.text_area(_ta_label, value=q["draft"], key=f"rtxt_{q['id']}",
                             height=110, label_visibility="collapsed", disabled=q["requested"])
         wl = _wl(text or "")
-        st.caption(("⚠️ " if wl > 280 else "") + f"文字数 {wl}/280")
+        st.caption(f"文字数 {wl}（Xは長文投稿に対応・上限なし）")
         if not q["requested"]:
             b1, b2 = st.columns([2, 1])
             _btn_label = "💬 リプを返す（＋いいね）" if is_mention else "🔁 引用RTする（＋いいね＋フォロー）"
             if b1.button(_btn_label, key=f"req_{q['id']}",
                          type="primary", use_container_width=True):
-                if _wl(text) > 280:
-                    st.error("文字数が280を超えています。短くしてください。")
-                else:
-                    _request_reply(q, text)
-                    _done = ("リプ返信を依頼しました（いいねも実行）" if is_mention
-                             else "引用RTを依頼しました（いいね＋フォローも実行）")
-                    st.success(f"✅ @{q['author']} の{_done}")
-                    st.rerun()
+                _request_reply(q, text)
+                _done = ("リプ返信を依頼しました（いいねも実行）" if is_mention
+                         else "引用RTを依頼しました（いいね＋フォローも実行）")
+                st.success(f"✅ @{q['author']} の{_done}")
+                st.rerun()
             if b2.button("🗑 見送り", key=f"skip_{q['id']}", use_container_width=True):
                 _skip_reply(q)
                 st.rerun()
