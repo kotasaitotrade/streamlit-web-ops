@@ -36,6 +36,15 @@ def _wl(text: str) -> int:
     return sum(2 if ord(c) > 0x2000 else 1 for c in text)
 
 
+def _reach_score(likes: int, views: int, age_min) -> float:
+    """ファインダーと同じ思想の到達スコア（エンゲージ＋勢い＋鮮度）。並べ替え・目安表示用。"""
+    age_h = 1.0 if not age_min or age_min <= 0 else age_min / 60.0
+    eng = likes * 40.0 + views
+    velocity = eng / (age_h + 0.5)
+    fresh = 1.0 / (1.0 + age_h / 6.0)
+    return round((eng * 0.4 + velocity * 4.0) * fresh, 1)
+
+
 def _tweet_age_min(target_id: str):
     """target_id(snowflake)から元ツイートの経過分を算出。"""
     try:
@@ -105,17 +114,18 @@ def load_queue():
         url = g("target_url").strip()
         if not url and g("target_id").strip():
             url = f"https://x.com/{g('author') or 'i'}/status/{g('target_id').strip()}"
+        _lk, _vw = _int(g("likes")), _int(g("views"))
         rows.append({"row": rnum, "id": g("id"), "author": g("author"),
                      "author_name": g("author_name"), "following": g("following") == "yes",
                      "source": g("source"), "target_url": url,
                      "target_text": g("target_text"), "target_img": g("target_img"),
                      "draft": g("draft"), "age_min": age,
-                     "likes": _int(g("likes")), "views": _int(g("views")),
+                     "likes": _lk, "views": _vw,
+                     "score": _reach_score(_lk, _vw, age),
                      "requested": bool(g("post_request").strip())})
-    # 自分宛リプ返しを最優先→フォロワー→検索。各群で新しい順
+    # 自分宛リプ返しを最優先→フォロワー→検索。各群では到達スコアの高い順（勢い×鮮度）
     _rank = {"mention": 0, "follower": 1}
-    rows.sort(key=lambda q: (_rank.get(q["source"], 2),
-                             q["age_min"] if q["age_min"] is not None else 9e9))
+    rows.sort(key=lambda q: (_rank.get(q["source"], 2), -q.get("score", 0)))
     return ws, rows, idx
 
 
@@ -165,7 +175,7 @@ for q in queue:
             top += f"　🕒 {age}"
         if q["requested"]:
             top += "　⏳ 依頼済み"
-        # エンゲージ（いいね・表示）
+        # エンゲージ（いいね・表示）＋到達スコア（勢い×鮮度の目安）
         eng = []
         if q["likes"]:
             eng.append(f"❤️ {q['likes']:,}")
@@ -173,6 +183,9 @@ for q in queue:
             eng.append(f"👁 {q['views']:,}")
         if eng:
             top += "　" + "　".join(eng)
+        if not is_mention and q.get("score"):
+            _fire = "🔥" if q["score"] >= 3000 else ("✨" if q["score"] >= 800 else "・")
+            top += f"　{_fire} 到達目安 {int(q['score']):,}"
         st.markdown(top)
         # 相手の投稿は全文表示（引用符付きで各行を見やすく）
         _tt = (q["target_text"] or "").strip()
