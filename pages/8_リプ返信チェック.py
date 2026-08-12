@@ -85,8 +85,12 @@ def load_queue():
         age = _tweet_age_min(g("target_id"))
         if age is not None and age > MAX_AGE_MIN:   # ★6時間超は表示しない
             continue
+        # Xの投稿リンク（target_urlが空でも author/status/target_id から補完）
+        url = g("target_url").strip()
+        if not url and g("target_id").strip():
+            url = f"https://x.com/{g('author') or 'i'}/status/{g('target_id').strip()}"
         rows.append({"row": rnum, "id": g("id"), "author": g("author"),
-                     "source": g("source"), "target_url": g("target_url"),
+                     "source": g("source"), "target_url": url,
                      "target_text": g("target_text"), "target_img": g("target_img"),
                      "draft": g("draft"), "age_min": age,
                      "requested": bool(g("post_request").strip())})
@@ -135,6 +139,8 @@ for q in queue:
             top += "　⏳ 依頼済み"
         st.markdown(top)
         st.markdown(f"> {q['target_text'][:220]}")
+        if q["target_url"]:
+            st.markdown(f"🔗 **[Xで元のポストを開く]({q['target_url']})**")
         if q["target_img"]:
             # st.image は外部URLで例外を投げることがあるので、素の<img>で安全に埋め込む
             st.markdown(
