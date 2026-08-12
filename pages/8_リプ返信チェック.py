@@ -20,8 +20,10 @@ logout_button()
 JST = timezone(timedelta(hours=9))
 SNS_SPREADSHEET_ID = "1jqpjM7bujJVm9uh7Hz85nvSWZdFFWp942mMltXBC_T8"  # 「SNS集客」
 WS_NAME = "x_replies"
-MAX_AGE_MIN = 6 * 60         # 引用RT候補：元ツイがこれ以上前なら非表示（6時間）
-MENTION_MAX_AGE_MIN = 48 * 60  # 自分宛リプ返し：会話なので48時間まで許容
+# 鮮度窓（ファインダー側の採用窓と一致させる：フォロワー24h／検索8h／自分宛リプ48h）
+SEARCH_MAX_AGE_MIN = 8 * 60      # 引用RT・検索由来（人気投稿の鮮度）
+FOLLOWER_MAX_AGE_MIN = 24 * 60   # 引用RT・フォロワー（関係性目的で時事性不要）
+MENTION_MAX_AGE_MIN = 48 * 60    # 自分宛リプ返し（会話なので長め）
 
 PERSONA = ("🧑 引用ペルソナ：**会社員SE・2児パパ**／6人の外注チーム＋自作ツールで物販を仕組み化。"
            "淡々・気合より仕組み・上から教えない。")
@@ -93,8 +95,11 @@ def load_queue():
         if not g("draft").strip():
             continue
         age = _tweet_age_min(g("target_id"))
-        _limit = MENTION_MAX_AGE_MIN if g("source") == "mention" else MAX_AGE_MIN
-        if age is not None and age > _limit:   # 鮮度切れは表示しない（引用RT6h/リプ返し48h）
+        _src = g("source")
+        _limit = (MENTION_MAX_AGE_MIN if _src == "mention"
+                  else FOLLOWER_MAX_AGE_MIN if _src == "follower"
+                  else SEARCH_MAX_AGE_MIN)
+        if age is not None and age > _limit:   # 鮮度切れは非表示（フォロワー24h/検索8h/リプ48h）
             continue
         # Xの投稿リンク（target_urlが空でも author/status/target_id から補完）
         url = g("target_url").strip()
