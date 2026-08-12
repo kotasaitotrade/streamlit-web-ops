@@ -35,18 +35,18 @@ st.caption("各リプの「返信を依頼」を押すと、その1件が数分�
 
 
 @st.cache_resource(show_spinner=False)
-def _ws():
+def _ws_replies():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _all_values():
-    return _ws().get_all_values()
+def _all_values_replies():
+    return _ws_replies().get_all_values()
 
 
 def load_queue():
-    ws = _ws()
-    vals = _all_values()
+    ws = _ws_replies()
+    vals = _all_values_replies()
     if not vals:
         return ws, [], {}
     h = vals[0]
@@ -89,12 +89,12 @@ def _request_reply(q, text):
     if text.strip() and text.strip() != q["draft"]:
         cells.append(gspread.Cell(q["row"], idx["draft"] + 1, text.strip()))
     ws.update_cells(cells)
-    _all_values.clear()
+    _all_values_replies.clear()
 
 
 def _skip_reply(q):
     ws.update_cell(q["row"], idx["status"] + 1, "skip")
-    _all_values.clear()
+    _all_values_replies.clear()
 
 
 for q in queue:

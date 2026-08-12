@@ -27,13 +27,13 @@ st.caption("候補アカウントを確認して「フォローを依頼」を�
 
 
 @st.cache_resource(show_spinner=False)
-def _ws():
+def _ws_follows():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _all_values():
-    return _ws().get_all_values()
+def _all_values_follows():
+    return _ws_follows().get_all_values()
 
 
 def _int(s):
@@ -44,8 +44,8 @@ def _int(s):
 
 
 def load_queue():
-    ws = _ws()
-    vals = _all_values()
+    ws = _ws_follows()
+    vals = _all_values_follows()
     if not vals:
         return ws, [], {}
     h = vals[0]
@@ -86,12 +86,12 @@ def _request_follow(q):
     import gspread
     now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     ws.update_cell(q["row"], idx["follow_request"] + 1, now)
-    _all_values.clear()
+    _all_values_follows.clear()
 
 
 def _skip(q):
     ws.update_cell(q["row"], idx["status"] + 1, "skip")
-    _all_values.clear()
+    _all_values_follows.clear()
 
 
 for q in queue:
