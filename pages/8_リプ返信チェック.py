@@ -76,7 +76,7 @@ def load_queue():
     idx = {name: (h.index(name) if name in h else -1) for name in
            ("id", "created", "source", "author", "author_name", "target_id", "target_url",
             "target_text", "target_img", "draft", "status", "tweet_id", "post_request",
-            "likes", "views")}
+            "likes", "views", "following")}
 
     def _int(s):
         try:
@@ -98,7 +98,7 @@ def load_queue():
         if not url and g("target_id").strip():
             url = f"https://x.com/{g('author') or 'i'}/status/{g('target_id').strip()}"
         rows.append({"row": rnum, "id": g("id"), "author": g("author"),
-                     "author_name": g("author_name"),
+                     "author_name": g("author_name"), "following": g("following") == "yes",
                      "source": g("source"), "target_url": url,
                      "target_text": g("target_text"), "target_img": g("target_img"),
                      "draft": g("draft"), "age_min": age,
@@ -144,7 +144,8 @@ def _skip_reply(q):
 for q in queue:
     with st.container(border=True):
         who = (f"**{q['author_name']}** " if q.get("author_name") else "") + f"@{q['author']}"
-        top = f"**{SRC_LABEL.get(q['source'], q['source'])}**　[{who}]({q['target_url']})"
+        fol = "✅ フォロー中" if q.get("following") else "➕ フォロー外（引用時にフォロー）"
+        top = f"**{SRC_LABEL.get(q['source'], q['source'])}**　{fol}　[{who}]({q['target_url']})"
         age = _age_label(q["age_min"])
         if age:
             top += f"　🕒 {age}"
