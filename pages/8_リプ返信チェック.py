@@ -22,7 +22,7 @@ SNS_SPREADSHEET_ID = "1jqpjM7bujJVm9uh7Hz85nvSWZdFFWp942mMltXBC_T8"  # 「SNS集
 WS_NAME = "x_replies"
 MAX_AGE_MIN = 6 * 60   # 元ツイートがこれ以上前なら表示しない（6時間）
 
-PERSONA = ("🧑 返信ペルソナ：**会社員SE・2児パパ**／6人の外注チーム＋自作ツールで物販を仕組み化。"
+PERSONA = ("🧑 引用ペルソナ：**会社員SE・2児パパ**／6人の外注チーム＋自作ツールで物販を仕組み化。"
            "淡々・気合より仕組み・上から教えない。")
 
 SRC_LABEL = {"mention": "💬 自分宛リプ", "hunter": "🗣 リプ営業", "finder_browser": "🗣 リプ営業"}
@@ -50,10 +50,10 @@ def _age_label(mins):
     return f"{int(mins // 60)}時間{int(mins % 60)}分前"
 
 
-st.title("💬 リプ返信チェック")
+st.title("🔁 引用RTチェック")
 st.caption(PERSONA)
-st.caption("各リプの「返信を依頼」で、その1件が数分以内にXへ返信されます（投稿はサーバー側）。"
-           "元ツイートが6時間以上前のものは自動で非表示。")
+st.caption("「引用RTする」を押すと、その1件を数分以内に【いいね→(フォロー外なら)フォロー→引用リツイート】します"
+           "（実行はサーバー側）。エンゲージのついた投稿をAIで精査済み。元ツイが6時間以上前のものは自動で非表示。")
 
 
 @st.cache_resource(show_spinner=False)
@@ -74,7 +74,13 @@ def load_queue():
     h = vals[0]
     idx = {name: (h.index(name) if name in h else -1) for name in
            ("id", "created", "source", "author", "target_id", "target_url", "target_text",
-            "target_img", "draft", "status", "tweet_id", "post_request")}
+            "target_img", "draft", "status", "tweet_id", "post_request", "likes", "views")}
+
+    def _int(s):
+        try:
+            return int(str(s).replace(",", "").strip() or 0)
+        except Exception:
+            return 0
     rows = []
     for rnum, r in enumerate(vals[1:], start=2):
         g = lambda name: (r[idx[name]] if 0 <= idx[name] < len(r) else "")
@@ -93,6 +99,7 @@ def load_queue():
                      "source": g("source"), "target_url": url,
                      "target_text": g("target_text"), "target_img": g("target_img"),
                      "draft": g("draft"), "age_min": age,
+                     "likes": _int(g("likes")), "views": _int(g("views")),
                      "requested": bool(g("post_request").strip())})
     rows.sort(key=lambda q: (q["age_min"] if q["age_min"] is not None else 9e9))  # 新しい順
     return ws, rows, idx
@@ -137,6 +144,14 @@ for q in queue:
             top += f"　🕒 {age}"
         if q["requested"]:
             top += "　⏳ 依頼済み"
+        # エンゲージ（いいね・表示）
+        eng = []
+        if q["likes"]:
+            eng.append(f"❤️ {q['likes']:,}")
+        if q["views"]:
+            eng.append(f"👁 {q['views']:,}")
+        if eng:
+            top += "　" + "　".join(eng)
         st.markdown(top)
         st.markdown(f"> {q['target_text'][:220]}")
         if q["target_url"]:
@@ -147,19 +162,19 @@ for q in queue:
                 f'<img src="{q["target_img"]}" style="max-width:280px;width:100%;'
                 f'border-radius:10px;margin:4px 0;" referrerpolicy="no-referrer">',
                 unsafe_allow_html=True)
-        text = st.text_area("返信文（編集可）", value=q["draft"], key=f"rtxt_{q['id']}",
+        text = st.text_area("引用コメント（編集可）", value=q["draft"], key=f"rtxt_{q['id']}",
                             height=110, label_visibility="collapsed", disabled=q["requested"])
         wl = _wl(text or "")
         st.caption(("⚠️ " if wl > 280 else "") + f"文字数 {wl}/280")
         if not q["requested"]:
             b1, b2 = st.columns([2, 1])
-            if b1.button("💬 このリプを依頼", key=f"req_{q['id']}", type="primary",
-                         use_container_width=True):
+            if b1.button("🔁 引用RTする（＋いいね＋フォロー）", key=f"req_{q['id']}",
+                         type="primary", use_container_width=True):
                 if _wl(text) > 280:
                     st.error("文字数が280を超えています。短くしてください。")
                 else:
                     _request_reply(q, text)
-                    st.success(f"✅ @{q['author']} に返信を依頼しました")
+                    st.success(f"✅ @{q['author']} の引用RTを依頼しました（いいね＋フォローも実行）")
                     st.rerun()
             if b2.button("🗑 見送り", key=f"skip_{q['id']}", use_container_width=True):
                 _skip_reply(q)
