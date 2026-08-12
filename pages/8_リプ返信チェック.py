@@ -20,7 +20,8 @@ logout_button()
 JST = timezone(timedelta(hours=9))
 SNS_SPREADSHEET_ID = "1jqpjM7bujJVm9uh7Hz85nvSWZdFFWp942mMltXBC_T8"  # 「SNS集客」
 WS_NAME = "x_replies"
-MAX_AGE_MIN = 6 * 60   # 元ツイートがこれ以上前なら表示しない（6時間）
+MAX_AGE_MIN = 6 * 60         # 引用RT候補：元ツイがこれ以上前なら非表示（6時間）
+MENTION_MAX_AGE_MIN = 48 * 60  # 自分宛リプ返し：会話なので48時間まで許容
 
 PERSONA = ("🧑 引用ペルソナ：**会社員SE・2児パパ**／6人の外注チーム＋自作ツールで物販を仕組み化。"
            "淡々・気合より仕組み・上から教えない。")
@@ -51,10 +52,11 @@ def _age_label(mins):
     return f"{int(mins // 60)}時間{int(mins % 60)}分前"
 
 
-st.title("🔁 引用RTチェック")
+st.title("🔁 引用RT／リプ返しチェック")
 st.caption(PERSONA)
-st.caption("「引用RTする」を押すと、その1件を数分以内に【いいね→(フォロー外なら)フォロー→引用リツイート】します"
-           "（実行はサーバー側）。エンゲージのついた投稿をAIで精査済み。元ツイが6時間以上前のものは自動で非表示。")
+st.caption("💬 **自分宛リプ**＝相手のリプに『リプで返す』（いいね付き・48hまで）。"
+           "🗣 **引用RT**＝良質な投稿を『いいね→(フォロー外なら)フォロー→引用リツイート』（6hまで）。"
+           "いずれもAI精査済み・実行はサーバー側。ボタンを押した1件だけ数分以内に実行します。")
 
 
 @st.cache_resource(show_spinner=False)
@@ -91,7 +93,8 @@ def load_queue():
         if not g("draft").strip():
             continue
         age = _tweet_age_min(g("target_id"))
-        if age is not None and age > MAX_AGE_MIN:   # ★6時間超は表示しない
+        _limit = MENTION_MAX_AGE_MIN if g("source") == "mention" else MAX_AGE_MIN
+        if age is not None and age > _limit:   # 鮮度切れは表示しない（引用RT6h/リプ返し48h）
             continue
         # Xの投稿リンク（target_urlが空でも author/status/target_id から補完）
         url = g("target_url").strip()
@@ -104,8 +107,9 @@ def load_queue():
                      "draft": g("draft"), "age_min": age,
                      "likes": _int(g("likes")), "views": _int(g("views")),
                      "requested": bool(g("post_request").strip())})
-    # フォロワーの投稿を最優先、その中で新しい順
-    rows.sort(key=lambda q: (0 if q["source"] == "follower" else 1,
+    # 自分宛リプ返しを最優先→フォロワー→検索。各群で新しい順
+    _rank = {"mention": 0, "follower": 1}
+    rows.sort(key=lambda q: (_rank.get(q["source"], 2),
                              q["age_min"] if q["age_min"] is not None else 9e9))
     return ws, rows, idx
 
@@ -142,9 +146,14 @@ def _skip_reply(q):
 
 
 for q in queue:
+    is_mention = q["source"] == "mention"
     with st.container(border=True):
         who = (f"**{q['author_name']}** " if q.get("author_name") else "") + f"@{q['author']}"
-        fol = "✅ フォロー中" if q.get("following") else "➕ フォロー外（引用時にフォロー）"
+        # フォロー状態は引用RTのみ表示（リプ返しはフォロー動作をしないため出さない）
+        if is_mention:
+            fol = "↩️ 自分宛リプへの返信"
+        else:
+            fol = "✅ フォロー中" if q.get("following") else "➕ フォロー外（引用時にフォロー）"
         top = f"**{SRC_LABEL.get(q['source'], q['source'])}**　{fol}　[{who}]({q['target_url']})"
         age = _age_label(q["age_min"])
         if age:
@@ -169,19 +178,23 @@ for q in queue:
                 f'<img src="{q["target_img"]}" style="max-width:280px;width:100%;'
                 f'border-radius:10px;margin:4px 0;" referrerpolicy="no-referrer">',
                 unsafe_allow_html=True)
-        text = st.text_area("引用コメント（編集可）", value=q["draft"], key=f"rtxt_{q['id']}",
+        _ta_label = "返信文（編集可）" if is_mention else "引用コメント（編集可）"
+        text = st.text_area(_ta_label, value=q["draft"], key=f"rtxt_{q['id']}",
                             height=110, label_visibility="collapsed", disabled=q["requested"])
         wl = _wl(text or "")
         st.caption(("⚠️ " if wl > 280 else "") + f"文字数 {wl}/280")
         if not q["requested"]:
             b1, b2 = st.columns([2, 1])
-            if b1.button("🔁 引用RTする（＋いいね＋フォロー）", key=f"req_{q['id']}",
+            _btn_label = "💬 リプを返す（＋いいね）" if is_mention else "🔁 引用RTする（＋いいね＋フォロー）"
+            if b1.button(_btn_label, key=f"req_{q['id']}",
                          type="primary", use_container_width=True):
                 if _wl(text) > 280:
                     st.error("文字数が280を超えています。短くしてください。")
                 else:
                     _request_reply(q, text)
-                    st.success(f"✅ @{q['author']} の引用RTを依頼しました（いいね＋フォローも実行）")
+                    _done = ("リプ返信を依頼しました（いいねも実行）" if is_mention
+                             else "引用RTを依頼しました（いいね＋フォローも実行）")
+                    st.success(f"✅ @{q['author']} の{_done}")
                     st.rerun()
             if b2.button("🗑 見送り", key=f"skip_{q['id']}", use_container_width=True):
                 _skip_reply(q)
