@@ -32,14 +32,14 @@ WS_NAME = "x_posts"
 
 
 @st.cache_resource(show_spinner=False)
-def _ws():
+def _ws_posts():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _all_values():
+@st.cache_data(ttl=15, show_spinner=False)
+def _all_values_posts():
     """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。"""
-    return _ws().get_all_values()
+    return _ws_posts().get_all_values()
 
 
 import re
@@ -61,7 +61,7 @@ def _img_view(url):
 
 
 def load_data():
-    vals = _all_values()
+    vals = _all_values_posts()
     if not vals:
         return [], 0, {}
     h = vals[0]
@@ -111,7 +111,7 @@ def apply_decisions(idx, id2info, decisions, edits):
         adopted += act == "a"
         skipped += act == "s"
     if cells:
-        _ws().update_cells(cells)
+        _ws_posts().update_cells(cells)
     return adopted, skipped, edited
 
 
@@ -122,6 +122,8 @@ if msg:
     st.success(msg)
 
 st.caption("右スワイプ＝採用（ドリップに追加）／左スワイプ＝廃棄。✏️で本文を編集できます。採用分は1日約10件・時間をばらして順次投稿されます。")
+if st.button("🔄 最新を再取得", use_container_width=True):
+    _all_values_posts.clear(); st.rerun()
 
 drafts, queued, idx = load_data()
 if queued:
@@ -129,6 +131,15 @@ if queued:
 
 if not drafts:
     st.success("チェック待ちの投稿ネタはありません。")
+    with st.expander("🔍 表示されない時（デバッグ）"):
+        _v = _all_values_posts()
+        st.write(f"シート総行: {len(_v)}行")
+        if _v:
+            _h = _v[0]
+            _si = _h.index("status") if "status" in _h else -1
+            from collections import Counter
+            _cnt = Counter(r[_si] for r in _v[1:] if _si >= 0 and len(r) > _si)
+            st.write("status別:", dict(_cnt))
     st.stop()
 
 
@@ -153,8 +164,8 @@ def _attach_image_ui():
             try:
                 with st.spinner("アップロード中…"):
                     url = upload_image_public(up.name, up.getvalue())
-                    _ws().update_cell(d["row"], idx["image_url"] + 1, url)
-                _all_values.clear()  # キャッシュ破棄→カードに反映
+                    _ws_posts().update_cell(d["row"], idx["image_url"] + 1, url)
+                _all_values_posts.clear()  # キャッシュ破棄→カードに反映
                 st.success("写真を添付しました。下のカードに反映されます。")
                 st.rerun()
             except Exception as e:
@@ -174,5 +185,5 @@ if result and isinstance(result, dict) and result.get("nonce") != st.session_sta
     a, s, e = apply_decisions(idx, id2info, result.get("decisions", {}), result.get("edits", {}))
     edited_note = f"／✏️ 編集反映 {e}件" if e else ""
     st.session_state["swipe_msg"] = f"✅ 採用 {a}件（ドリップに追加）／🗑 廃棄 {s}件{edited_note}"
-    _all_values.clear()  # キャッシュ破棄→次回は最新を読む
+    _all_values_posts.clear()  # キャッシュ破棄→次回は最新を読む
     st.rerun()
