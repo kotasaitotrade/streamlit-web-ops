@@ -17,10 +17,16 @@
   .cardimgs{display:flex;gap:6px;margin-top:10px;justify-content:center;}
   .cardimg{flex:1;min-width:0;max-height:190px;object-fit:contain;border-radius:10px;background:#f8f9fa;}
   .txt{margin-top:12px;font-size:18px;line-height:1.65;color:#111;overflow-y:auto;flex:1;white-space:pre-wrap;}
-  .edit{margin-top:12px;flex:1;width:100%;font-size:17px;line-height:1.6;padding:10px;
+  .pagewrap{margin-top:4px;overflow-y:auto;flex:1;}
+  .pagelabel{font-size:12px;font-weight:700;color:#1971c2;background:#e7f1fc;display:inline-block;
+    border-radius:10px;padding:2px 10px;margin-top:10px;}
+  .pagediv{border-top:1px dashed #ced4da;margin:10px 0;}
+  .editpages{display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;margin-top:8px;}
+  .editpage{display:flex;flex-direction:column;min-height:0;flex:1;}
+  .edit{flex:1;min-height:56px;width:100%;font-size:16px;line-height:1.55;padding:9px;
     border:2px solid #1971c2;border-radius:10px;resize:none;touch-action:auto;font-family:inherit;}
   .editing{touch-action:auto;}
-  .cnt{font-size:12px;color:#868e96;text-align:right;margin-top:4px;}
+  .cnt{font-size:12px;color:#868e96;text-align:right;margin-top:2px;}
   .cnt.over{color:#fa5252;font-weight:700;}
   .stamp{position:absolute;top:22px;font-size:30px;font-weight:900;padding:6px 14px;border-radius:12px;
     border:4px solid;opacity:0;pointer-events:none;}
@@ -72,6 +78,21 @@ const stack=document.getElementById('stack'), counter=document.getElementById('c
 function esc(t){return (t||'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 function curText(c){ return (c.id in edits) ? edits[c.id] : c.text; }
 function wlen(t){ let n=0; for(const ch of (t||'')) n += ch.codePointAt(0)>0x2000 ? 2 : 1; return n; }
+// ツリー投稿(===PAGE2===/===PAGE3===区切り)をページ配列に分解・再結合する。
+// 編集UIをページ単位に分けることで、あるページの編集で他ページが巻き込まれて消えるのを防ぐ。
+function splitPages(t){
+  if(!t || !t.includes('===PAGE2===')) return [t||''];
+  const i = t.indexOf('===PAGE2===');
+  const p1 = t.slice(0, i), rest = t.slice(i + '===PAGE2==='.length);
+  const j = rest.indexOf('===PAGE3===');
+  if(j === -1) return [p1, rest];
+  return [p1, rest.slice(0, j), rest.slice(j + '===PAGE3==='.length)];
+}
+function joinPages(pages){
+  if(pages.length <= 1) return pages[0] || '';
+  if(pages.length === 2) return pages[0] + '===PAGE2===' + pages[1];
+  return pages[0] + '===PAGE2===' + pages[1] + '===PAGE3===' + pages[2];
+}
 function render(){
   stack.innerHTML='';
   const remain=order.filter(c=>!(c.id in decisions));
@@ -84,22 +105,40 @@ function render(){
     const _imgs = (c.imgs && c.imgs.length) ? c.imgs : (c.img ? [c.img] : []);
     const img = _imgs.length ? `<div class="cardimgs">${_imgs.map(u=>`<img class="cardimg" src="${esc(u)}" onerror="this.style.display='none'">`).join('')}</div>` : '';
     if(isTop && editingId===c.id){
-      const t=curText(c); const wl=wlen(t);
+      const pages=splitPages(curText(c));
       el.classList.add('editing');
+      const pagesHtml=pages.map((p,idx)=>{
+        const wl=wlen(p);
+        const label=pages.length>1 ? `<div class="pagelabel">${idx+1}/${pages.length}ページ目</div>` : '';
+        return `<div class="editpage">${label}<textarea class="edit" data-page="${idx}">${esc(p)}</textarea>
+          <div class="cnt${wl>490?' over':''}" data-page="${idx}">文字数 ${wl}/490</div></div>`;
+      }).join('');
       el.innerHTML=`<div class="chead"><div class="cat">${esc(c.cat)}</div>
         <button class="editbtn" data-act="done">✅ 完了</button></div>${img}
-        <textarea class="edit">${esc(t)}</textarea>
-        <div class="cnt${wl>280?' over':''}">文字数 ${wl}/280</div>`;
+        <div class="editpages">${pagesHtml}</div>`;
       stack.appendChild(el);
-      const ta=el.querySelector('.edit'), cnt=el.querySelector('.cnt');
-      ta.addEventListener('input',()=>{ edits[c.id]=ta.value; const w=wlen(ta.value);
-        cnt.textContent=`文字数 ${w}/280`; cnt.className='cnt'+(w>280?' over':''); });
-      el.querySelector('[data-act="done"]').onclick=()=>{ edits[c.id]=ta.value; editingId=null; render(); };
-      setTimeout(()=>ta.focus(),30);
+      const tas=el.querySelectorAll('.edit');
+      const commit=()=>{ edits[c.id]=joinPages(Array.from(tas).map(t=>t.value)); };
+      tas.forEach(ta=>{
+        ta.addEventListener('input',()=>{
+          commit();
+          const w=wlen(ta.value);
+          const cnt=el.querySelector(`.cnt[data-page="${ta.dataset.page}"]`);
+          cnt.textContent=`文字数 ${w}/490`; cnt.className='cnt'+(w>490?' over':'');
+        });
+      });
+      el.querySelector('[data-act="done"]').onclick=()=>{ commit(); editingId=null; render(); };
+      setTimeout(()=>tas[0] && tas[0].focus(),30);
     } else {
       const editBtn = isTop ? `<button class="editbtn" data-act="edit">✏️ 編集</button>` : '';
+      const pages=splitPages(curText(c));
+      const body = pages.length>1
+        ? `<div class="pagewrap">${pages.map((p,idx)=>
+            `<div class="pagelabel">${idx+1}/${pages.length}ページ目</div><div class="txt" style="margin-top:4px;overflow:visible;flex:none;">${esc(p)}</div>`
+            + (idx<pages.length-1 ? '<div class="pagediv"></div>' : '')).join('')}</div>`
+        : `<div class="txt">${esc(pages[0])}</div>`;
       el.innerHTML=`<div class="chead"><div class="cat">${esc(c.cat)}</div>${editBtn}</div>${img}
-        <div class="txt">${esc(curText(c))}</div>
+        ${body}
         <div class="stamp yes">採用</div><div class="stamp no">廃棄</div>`;
       stack.appendChild(el);
       const eb=el.querySelector('[data-act="edit"]');
