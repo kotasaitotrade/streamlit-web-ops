@@ -38,9 +38,17 @@ def _ws_posts():
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _all_values_posts():
-    """シート全体をキャッシュ（再描画のたびに読まないfor API節約）＋429リトライ。"""
-    from lib.sheets import read_values_retry
-    return read_values_retry(_ws_posts())
+    """シート全体をキャッシュ（再描画のたびに読まないfor API節約）＋429リトライ（直書き）。"""
+    import time
+    ws = _ws_posts()
+    for _i in range(5):
+        try:
+            return ws.get_all_values()
+        except Exception:
+            if _i == 4:
+                raise
+            time.sleep(1.2 * (_i + 1))
+    return []
 
 
 import re

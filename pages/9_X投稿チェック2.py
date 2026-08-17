@@ -35,8 +35,16 @@ def _all_values_chii():
     """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。
     ★関数名は page7 と重複させない：@st.cache_* は全セッション共有・関数名でキーされるため、
       同名だと page7(x_posts) の結果を page9(x_posts_chii) が使い回してしまう（タブ取り違え事故）。"""
-    from lib.sheets import read_values_retry
-    return read_values_retry(_ws_chii())
+    import time
+    ws = _ws_chii()
+    for _i in range(5):
+        try:
+            return ws.get_all_values()
+        except Exception:
+            if _i == 4:
+                raise
+            time.sleep(1.2 * (_i + 1))
+    return []
 
 
 import re
