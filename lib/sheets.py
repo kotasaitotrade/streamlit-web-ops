@@ -16,6 +16,24 @@ from google.oauth2.credentials import Credentials
 
 SPREADSHEET_ID = "1xgn0MDZRLQeuvgBXtDNaHyRVID6zZRVXDGXALI4YOjM"
 
+
+def read_values_retry(ws, tries: int = 5):
+    """ws.get_all_values() を 429(レート制限)/5xx に対しバックオフ付きでリトライする。
+    Sheets APIの一時的な RESOURCE_EXHAUSTED で画面がエラー落ちするのを防ぐ。"""
+    last = None
+    for i in range(tries):
+        try:
+            return ws.get_all_values()
+        except gspread.exceptions.APIError as e:  # noqa: PERF203
+            last = e
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code not in (429, 500, 502, 503, None) or i == tries - 1:
+                raise
+            time.sleep(1.2 * (i + 1))  # 1.2, 2.4, 3.6, 4.8s のバックオフ
+    if last:
+        raise last
+    return []
+
 JOBS_SHEET = "jobs"
 USERS_SHEET = "users"
 TOOLS_SHEET = "tools"

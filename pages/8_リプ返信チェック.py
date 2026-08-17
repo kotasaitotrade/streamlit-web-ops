@@ -77,7 +77,8 @@ def _ws_replies():
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _all_values_replies():
-    return _ws_replies().get_all_values()
+    from lib.sheets import read_values_retry
+    return read_values_retry(_ws_replies())
 
 
 def load_queue():

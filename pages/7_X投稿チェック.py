@@ -36,10 +36,11 @@ def _ws_posts():
     return get_client().open_by_key(SNS_SPREADSHEET_ID).worksheet(WS_NAME)
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _all_values_posts():
-    """シート全体を最大60秒キャッシュ（再描画のたびに読まないfor API節約）。"""
-    return _ws_posts().get_all_values()
+    """シート全体をキャッシュ（再描画のたびに読まないfor API節約）＋429リトライ。"""
+    from lib.sheets import read_values_retry
+    return read_values_retry(_ws_posts())
 
 
 import re
